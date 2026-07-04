@@ -1,0 +1,40 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '31 5 * * 1'
+
+jobs:
+  analyze:
+    name: Analyze (java-kotlin)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      # Single checkout at the workspace root so CodeQL traces the compile correctly. No sibling
+      # contracts checkout: with no `../capullo-audio-contracts`, settings.gradle.kts skips the
+      # composite build and resolves contracts from jitpack (Kotlin needs a traced build; build-mode
+      # none is Java-only).
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          language: java-kotlin
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      # --rerun-tasks forces a real compile so CodeQL traces it even on a warm Gradle cache.
+      - name: Compile (contracts + lib-snapcast from jitpack; Android SDK preinstalled)
+        run: ./gradlew :capullo-audio:compileDebugKotlin --no-daemon --rerun-tasks
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3

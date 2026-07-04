@@ -1,0 +1,43 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout engine
+        uses: actions/checkout@v4
+        with:
+          path: capullo-audio
+      # Sibling checkout so settings.gradle.kts `includeBuild("../capullo-audio-contracts")`
+      # resolves. Both repos are public → default token can read the contracts repo.
+      - name: Checkout contracts (sibling for includeBuild)
+        uses: actions/checkout@v4
+        with:
+          repository: capullo-tech/capullo-audio-contracts
+          path: capullo-audio-contracts
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      # ubuntu-latest ships the Android SDK; lib-snapcast-android resolves from jitpack.
+      - name: Assemble harness APK (packages the snapcast .so)
+        working-directory: capullo-audio
+        run: ./gradlew :app:assembleDebug --no-daemon
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: capullo-audio-harness-${{ github.sha }}
+          path: 'capullo-audio/**/build/outputs/apk/debug/*.apk'
