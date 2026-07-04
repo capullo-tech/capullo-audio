@@ -53,7 +53,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val scope = CoroutineScope(Dispatchers.Main)
-        val engine = CapulloAudioEngine(this, source, nowPlayingSource, controller, scope)
+        val engine =
+            CapulloAudioEngine(this, source, nowPlayingSource, controller, scope, streamName = "CapulloHarness")
         setContentView(
             TextView(this).apply {
                 text = "capullo-audio harness\nengine wired: ${engine.javaClass.simpleName}"

@@ -13,16 +13,26 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 
-class SnapserverProcess(private val context: Context) {
+/**
+ * @param streamName the Snapcast stream's `name=` - the identity shown in the web player and to
+ *   snapclients. Each app supplies its own (e.g. "QuantumCast", "Telecloud") so multiple capullo
+ *   apps on one LAN stay distinguishable.
+ */
+class SnapserverProcess(
+    private val context: Context,
+    streamName: String = DEFAULT_STREAM_NAME,
+) {
 
     private val nativeLibDir: String = context.applicationInfo.nativeLibraryDir
     private val cacheDir: File = context.cacheDir
     private val confFile: String = getSnapserverConfPath()
     val pipeFilepath: String = createFifo()
 
+    private val streamNameArg: String = "name=$streamName"
+
     companion object {
+        const val DEFAULT_STREAM_NAME = "Capullo"
         private const val PIPE_NAME = "filifo"
-        private const val STREAM_NAME = "name=QuantumCast"
         private const val CODEC = "codec=pcm"
         private const val PIPE_MODE = "mode=read"
         private const val DRYOUT_MS = "dryout_ms=10000"
@@ -48,7 +58,7 @@ class SnapserverProcess(private val context: Context) {
     }
 
     private val pipeArgs = listOf(
-        STREAM_NAME, CODEC, PIPE_MODE, DRYOUT_MS, SAMPLE_FORMAT,
+        streamNameArg, CODEC, PIPE_MODE, DRYOUT_MS, SAMPLE_FORMAT,
         "controlscript=$nativeLibDir/libsnapcontrol.so",
     ).joinToString("&")
 
@@ -77,8 +87,8 @@ class SnapserverProcess(private val context: Context) {
         val webUiPath = File(context.filesDir, "webui").absolutePath
         try {
             // Always rewrite so doc_root stays current and server.json reset takes effect.
-            // Non-default ports (defaults 1704/1705/1780) so QuantumCast never collides with
-            // other Snapcast apps on the same device (e.g. older capullo radio builds).
+            // Non-default ports (defaults 1704/1705/1780) so a capullo-audio app never collides
+            // with other Snapcast apps on the same device (e.g. stock Snapcast, older builds).
             confFile.writeText(
                 """
                 [stream]

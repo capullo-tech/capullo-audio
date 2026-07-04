@@ -44,8 +44,9 @@ public fun MediaRequest.toMediaItem(): MediaItem =
  *    for Telecloud's 2-track lookahead.
  *  - **snapclient** local playback + listen-in mode (SnapclientProcess) and channel switching.
  *  - app-owned concerns stay in the Service: buffering timeout, station-error fallback, notifications.
- *  - `SnapserverProcess.STREAM_NAME` is currently hardcoded `"name=QuantumCast"` - parameterize it
- *    per app before Telecloud consumes this.
+ *
+ * @param streamName the Snapcast stream identity broadcast to web players and snapclients - each app
+ *   supplies its own (e.g. "QuantumCast", "Telecloud") so instances stay distinguishable on a LAN.
  */
 @UnstableApi
 public class CapulloAudioEngine(
@@ -54,6 +55,7 @@ public class CapulloAudioEngine(
     private val nowPlaying: NowPlayingSource,
     private val controller: PlaybackController,
     private val scope: CoroutineScope,
+    private val streamName: String = SnapserverProcess.DEFAULT_STREAM_NAME,
 ) {
     private var exoPlayer: ExoPlayer? = null
     private var fifoSink: FifoAudioBufferSink? = null
@@ -62,7 +64,7 @@ public class CapulloAudioEngine(
 
     /** Bring up snapserver (creates the FIFO), the control plugin, and metadata forwarding. */
     public fun startBroadcast(parentJob: Job) {
-        val server = SnapserverProcess(context).also { snapserver = it }
+        val server = SnapserverProcess(context, streamName).also { snapserver = it }
         scope.launch { server.start() }
 
         val p = SnapcontrolPlugin(nowPlaying.nowPlaying, controller, parentJob).also { plugin = it }
