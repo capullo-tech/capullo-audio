@@ -43,3 +43,7 @@ Namespace `tech.capullo.audio` · Gradle 9.6.1 · Kotlin 2.3.10 · AGP 9.1.0 · 
 
 Requires the Android SDK. Contracts resolves from jitpack by default; for local co-development,
 check it out beside this repo and `settings.gradle.kts` substitutes it via a composite build.
+
+## License
+
+Copyright 2026 capullo-tech. Licensed under GPLv3 - see [`LICENSE`](LICENSE) (integrates GPLv3 Snapcast via lib-snapcast-android; substantially derived from RadioCapullo).
