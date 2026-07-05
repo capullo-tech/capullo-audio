@@ -49,7 +49,64 @@ class FifoAudioBufferSink(private val fifoPath: String) : TeeAudioProcessor.Audi
     // stale buffers into the next session's fresh pipe.
     @Volatile private var closed = false
 
-    fun enableWrites() { writeEnabled = true }
+    // --- Silence keep-alive (stream priming) ---
+    // The snapserver's AsioStream marks the pipe source "idle" after ~120ms with no data. Feeding the
+    // FIFO only from handleBuffer (real PCM) starves it during any gap - startup buffering, between
+    // tracks, a brief network stall - so the stream blips idle, which (a) flickers the stream-status /
+    // web power button at startup and (b) leaves a client that JOINS during an idle blip with no audio
+    // until the stream restarts. A keep-alive thread writes silence whenever real PCM hasn't flowed
+    // for GAP_THRESHOLD_MS, so the stream stays continuously "playing": no startup flicker, late
+    // joiners get audio immediately, and short stalls don't drop the stream. Real PCM and silence are
+    // serialized on writeLock so the two writers never interleave and corrupt the PCM; during normal
+    // playback handleBuffer fires well inside the threshold, so the keep-alive stays idle and the audio
+    // path is untouched (silence flows only during actual gaps). The engine watchdog still fires on a
+    // genuinely stuck station (position frozen ~20s) - priming only keeps the SNAPCAST stream alive, it
+    // doesn't advance ExoPlayer's clock.
+    private val writeLock = Any()
+    @Volatile private var lastRealWriteNs = 0L
+    @Volatile private var priming = false
+    private var silenceThread: Thread? = null
+    // 40ms of the guaranteed 44100Hz/16-bit/stereo format = 1764 frames * 4 bytes.
+    private val silence = ByteArray(44100 * SILENCE_CHUNK_MS / 1000 * 2 * 2)
+
+    fun enableWrites() {
+        writeEnabled = true
+        startPriming()
+    }
+
+    private fun startPriming() {
+        if (priming || closed) return
+        priming = true
+        lastRealWriteNs = 0L // 0 = "no real PCM yet" → prime immediately until the first buffer arrives
+        silenceThread = Thread {
+            val buf = ByteBuffer.wrap(silence)
+            while (priming && !closed) {
+                try {
+                    if (writeEnabled && gapExceeded()) {
+                        synchronized(writeLock) {
+                            if (writeEnabled && !closed && gapExceeded()) {
+                                out?.channel?.let { ch ->
+                                    buf.rewind()
+                                    while (buf.hasRemaining()) ch.write(buf)
+                                }
+                            }
+                        }
+                    }
+                    Thread.sleep(SILENCE_CHUNK_MS.toLong())
+                } catch (e: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    if (!closed) Log.w(TAG, "FIFO silence keep-alive write failed: ${e.message}")
+                }
+            }
+        }.apply { name = "FifoSilenceKeepAlive"; isDaemon = true; start() }
+    }
+
+    // True while no real PCM has flowed for longer than the idle threshold (or none ever has).
+    private fun gapExceeded(): Boolean {
+        val last = lastRealWriteNs
+        return last == 0L || (System.nanoTime() - last) / 1_000_000 > GAP_THRESHOLD_MS
+    }
 
     fun open() {
         if (closed || out != null) return
@@ -66,9 +123,12 @@ class FifoAudioBufferSink(private val fifoPath: String) : TeeAudioProcessor.Audi
     fun close() {
         closed = true
         writeEnabled = false
+        priming = false
+        silenceThread?.interrupt()
+        silenceThread = null
         try { out?.close() } catch (_: Exception) {}
         out = null
-        fd = null  // closed via the stream
+        fd = null // closed via the stream
     }
 
     override fun flush(sampleRateHz: Int, channelCount: Int, encoding: Int) {
@@ -78,17 +138,29 @@ class FifoAudioBufferSink(private val fifoPath: String) : TeeAudioProcessor.Audi
     }
 
     override fun handleBuffer(buffer: ByteBuffer) {
-        if (!writeEnabled) return  // preroll PCM is dropped, see writeEnabled
-        val o = out ?: return
-        try {
-            val ch = o.channel
-            while (buffer.hasRemaining()) ch.write(buffer)
-        } catch (e: Exception) {
-            if (!closed) Log.w(TAG, "FIFO write failed: ${e.message}")
+        if (!writeEnabled) return // preroll PCM is dropped, see writeEnabled
+        // Serialize with the silence keep-alive so the two writers never interleave into the pipe.
+        synchronized(writeLock) {
+            val o = out ?: return
+            lastRealWriteNs = System.nanoTime() // marks real audio flowing → keep-alive backs off
+            try {
+                val ch = o.channel
+                while (buffer.hasRemaining()) ch.write(buffer)
+            } catch (e: Exception) {
+                if (!closed) Log.w(TAG, "FIFO write failed: ${e.message}")
+            }
         }
     }
 
-    companion object { private const val TAG = "FifoAudioSink" }
+    companion object {
+        private const val TAG = "FifoAudioSink"
+
+        // Keep-alive silence chunk (~40ms) and the gap after which it kicks in. GAP_THRESHOLD_MS is
+        // comfortably under the snapserver's ~120ms AsioStream idle timeout; SILENCE_CHUNK_MS paces
+        // the writer at ~real-time so it never buffers meaningful silence ahead of real audio.
+        private const val SILENCE_CHUNK_MS = 40
+        private const val GAP_THRESHOLD_MS = 80L
+    }
 }
 
 /**
