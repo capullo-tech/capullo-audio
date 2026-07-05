@@ -15,6 +15,9 @@ espresso = "3.6.1"
 contracts = "main-SNAPSHOT"
 # lib-snapcast-android via jitpack (public build, no token) - same coordinate the apps use.
 libSnapcast = "78d1c48"
+# lib-media3-ffmpeg-android (Layer 0) via jitpack - prebuilt media3 decoder_ffmpeg AAR, pinned by
+# commit (like libSnapcast). Rebuilt/re-tagged only when media3 bumps (see that repo's BUILD_FFMPEG.md).
+libMedia3Ffmpeg = "31dcef4545"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -33,6 +36,8 @@ media3-datasource = { module = "androidx.media3:media3-datasource", version.ref 
 capullo-audio-contracts = { module = "com.github.capullo-tech:capullo-audio-contracts", version.ref = "contracts" }
 # Snapcast native binaries (Layer 0) - jitpack multi-module coordinate (group = com.github.<org>.<repo>).
 lib-snapcast-android = { module = "com.github.capullo-tech.lib-snapcast-android:lib-snapcast-android", version.ref = "libSnapcast" }
+# FFmpeg decoder AAR (Layer 0) - jitpack single-artifact coordinate (group = com.github.<org>).
+lib-media3-ffmpeg-android = { module = "com.github.capullo-tech:lib-media3-ffmpeg-android", version.ref = "libMedia3Ffmpeg" }
 
 junit = { module = "junit:junit", version.ref = "junit" }
 androidx-junit = { module = "androidx.test.ext:junit", version.ref = "androidxJunit" }

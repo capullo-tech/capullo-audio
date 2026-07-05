@@ -101,7 +101,8 @@ class FifoAudioBufferSink(private val fifoPath: String) : TeeAudioProcessor.Audi
  * receives full-scale PCM.
  *
  * EXTENSION_RENDERER_MODE_ON prefers platform MediaCodec decoders and falls
- * back to the bundled FFmpeg decoders (Jellyfin build) for anything exotic.
+ * back to the bundled FFmpeg decoders (lib-media3-ffmpeg-android, loaded
+ * reflectively off the classpath) for anything exotic.
  *
  * Limitation: only mono and stereo inputs are mapped (covers radio streams);
  * a >2-channel stream would fail to configure. Add explicit downmix matrices

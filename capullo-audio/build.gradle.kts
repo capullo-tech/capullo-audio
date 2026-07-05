@@ -47,14 +47,20 @@ dependencies {
     // Layer 1 SPI (the only thing apps also see through this engine's api surface).
     api(libs.capullo.audio.contracts)
 
-    // Media3 delivery pipeline. FFmpeg decoder (lib-media3-ffmpeg-android) is loaded reflectively
-    // by DefaultRenderersFactory when present on the app classpath - not a compile dependency here.
-    // exoplayer + common are `api`: the public surface exposes their types (CapulloAudioEngine is
-    // @UnstableApi, toMediaItem() returns MediaItem, FifoRenderersFactory : DefaultRenderersFactory).
+    // Media3 delivery pipeline. exoplayer + common are `api`: the public surface exposes their types
+    // (CapulloAudioEngine is @UnstableApi, toMediaItem() returns MediaItem, FifoRenderersFactory :
+    // DefaultRenderersFactory).
     api(libs.media3.exoplayer)
     api(libs.media3.common)
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.datasource)
+
+    // FFmpeg software audio decoders (Layer 0) for codec parity with QuantumCast - mp3/aac/vorbis/
+    // opus/flac fallback when the device MediaCodec lacks a codec (FifoRenderersFactory sets
+    // EXTENSION_RENDERER_MODE_ON). Runtime-only: DefaultRenderersFactory loads FfmpegAudioRenderer
+    // reflectively off the classpath - never referenced at compile time. `implementation` on this
+    // library still propagates the .so transitively into the consuming app for packaging.
+    implementation(libs.lib.media3.ffmpeg.android)
 
     // Snapcast native binaries (libsnapserver.so / libsnapclient.so / libsnapcontrol.so).
     implementation(libs.lib.snapcast.android)
