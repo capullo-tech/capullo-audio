@@ -33,6 +33,11 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
       # ubuntu-latest ships the Android SDK; lib-snapcast-android resolves from jitpack.
+      # Contract-validation driver: the fake-driven JVM unit test that drives QueuePlaybackLoop
+      # (idAt → mediaRequestFor → play → onQueueAdvanced) - the engine-side bidirectional proof.
+      - name: Run contract-validation unit test
+        working-directory: capullo-audio
+        run: ./gradlew :capullo-audio:testDebugUnitTest --no-daemon
       - name: Assemble harness APK (packages the snapcast .so)
         working-directory: capullo-audio
         run: ./gradlew :app:assembleDebug --no-daemon

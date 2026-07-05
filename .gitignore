@@ -6,3 +6,6 @@ build/
 local.properties
 .DS_Store
 .cxx/
+# Remote-build scratch over the network share; not part of the repo.
+build-share.log
+run-facade-build.cmd

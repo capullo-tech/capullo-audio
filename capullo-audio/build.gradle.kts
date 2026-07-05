@@ -27,6 +27,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    testOptions {
+        // The contract-validation driver test (EnginePlaybackContractTest) is pure JVM - it drives
+        // QueuePlaybackLoop against a FakeMediaPlayback, so Android framework calls return defaults.
+        unitTests.isReturnDefaultValues = true
+    }
     // New DSL for Kotlin 2.3 / AGP 9.x (mirrors RadioCapullo, the known-good reference).
     kotlin {
         compilerOptions {
@@ -65,6 +70,7 @@ dependencies {
     implementation(libs.ktor.serialization.kotlinx.json)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
