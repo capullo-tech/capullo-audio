@@ -32,7 +32,9 @@ class SnapcastControlClient(
     private val websocketPort: Int = 1680,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
-    val client = HttpClient(OkHttp) {
+    // internal, not public: consumers tear down via close() instead of touching the ktor client, so
+    // ktor stays an implementation detail of this module (apps don't need ktor on their classpath).
+    internal val client = HttpClient(OkHttp) {
         engine {
             config { pingInterval(20, TimeUnit.SECONDS) }
         }
@@ -155,6 +157,11 @@ class SnapcastControlClient(
                 params = StreamControlParams(id = streamId, command = command),
             )
         )
+    }
+
+    /** Release the underlying ktor client + its connection pool. Call on teardown. */
+    fun close() {
+        client.close()
     }
 
     companion object {
