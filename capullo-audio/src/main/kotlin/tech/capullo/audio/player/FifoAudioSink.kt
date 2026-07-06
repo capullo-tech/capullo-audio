@@ -33,7 +33,20 @@ import java.nio.ByteBuffer
  * PlaybackService detects, same as with VLC's blocked sout.
  */
 @UnstableApi
-class FifoAudioBufferSink(private val fifoPath: String) : TeeAudioProcessor.AudioBufferSink {
+/**
+ * @param fifoPath the named pipe the tee'd PCM is written into.
+ * @param enableKeepAlive when true (default), a background thread writes silence into the FIFO
+ *   during gaps so the Snapserver stream never blips idle (no startup flicker; late web/LAN joiners
+ *   get audio immediately). Suitable for a continuous single source (e.g. internet radio). Set
+ *   **false** for a player whose sink delivers PCM in bursts paced by AudioTrack backpressure (extra
+ *   processors, local-file decode): there the 80 ms gap threshold trips during normal drain waits and
+ *   the keep-alive overfeeds the pipe - the tee back-pressures the sink (ExoPlayer buffers) and the
+ *   snapclient overflows (stutter). Such apps feed the FIFO from real PCM only.
+ */
+class FifoAudioBufferSink(
+    private val fifoPath: String,
+    private val enableKeepAlive: Boolean = true,
+) : TeeAudioProcessor.AudioBufferSink {
 
     // Opened on the caller's thread (main), written on the playback thread
     @Volatile private var fd: FileDescriptor? = null
@@ -75,7 +88,7 @@ class FifoAudioBufferSink(private val fifoPath: String) : TeeAudioProcessor.Audi
     }
 
     private fun startPriming() {
-        if (priming || closed) return
+        if (!enableKeepAlive || priming || closed) return
         priming = true
         lastRealWriteNs = 0L // 0 = "no real PCM yet" → prime immediately until the first buffer arrives
         silenceThread = Thread {
