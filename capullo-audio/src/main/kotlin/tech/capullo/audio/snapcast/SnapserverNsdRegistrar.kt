@@ -12,10 +12,19 @@ class SnapserverNsdRegistrar(context: Context) {
     private val listeners = mutableListOf<NsdManager.RegistrationListener>()
     private var advertisedName = Build.MODEL
 
-    fun start(customName: String = "") {
+    /**
+     * Advertise the running Snapserver over NSD. Pass the server's resolved ports
+     * ([SnapserverProcess.ports]) so discovery carries the real ports when they are auto-assigned;
+     * the defaults keep the legacy fixed ports for callers that have not opted into free ports.
+     */
+    fun start(
+        customName: String = "",
+        streamPort: Int = SnapserverDiscoveryManager.SERVICE_PORT,
+        tcpPort: Int = SnapserverDiscoveryManager.STREAM_SERVICE_PORT,
+    ) {
         advertisedName = customName.trim().ifBlank { Build.MODEL }
-        register(SnapserverDiscoveryManager.SERVICE_TYPE, SnapserverDiscoveryManager.SERVICE_PORT)
-        register(SnapserverDiscoveryManager.STREAM_SERVICE_TYPE, SnapserverDiscoveryManager.STREAM_SERVICE_PORT)
+        register(SnapserverDiscoveryManager.SERVICE_TYPE, streamPort)
+        register(SnapserverDiscoveryManager.STREAM_SERVICE_TYPE, tcpPort)
         Log.d(TAG, "Snapserver NSD registered as '${SnapserverDiscoveryManager.SERVICE_NAME_PREFIX}$advertisedName'")
     }
 

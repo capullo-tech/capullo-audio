@@ -21,6 +21,12 @@ import java.io.InputStreamReader
 class SnapserverProcess(
     private val context: Context,
     streamName: String = DEFAULT_STREAM_NAME,
+    /**
+     * The TCP ports Snapserver binds. Default is the legacy fixed 1604/1605/1680; pass
+     * [SnapserverPorts.free] for OS-assigned ports so multiple capullo apps coexist on one device.
+     * Read back off [ports] to wire NSD / the listen-in URL / the local snapclient / control client.
+     */
+    val ports: SnapserverPorts = SnapserverPorts.Fixed,
 ) {
 
     private val nativeLibDir: String = context.applicationInfo.nativeLibraryDir
@@ -87,18 +93,18 @@ class SnapserverProcess(
         val webUiPath = File(context.filesDir, "webui").absolutePath
         try {
             // Always rewrite so doc_root stays current and server.json reset takes effect.
-            // Non-default ports (defaults 1704/1705/1780) so a capullo-audio app never collides
-            // with other Snapcast apps on the same device (e.g. stock Snapcast, older builds).
+            // Ports come from `ports` (default fixed 1604/1605/1680; or free() so a capullo-audio
+            // app never collides with other Snapcast apps / instances on the same device).
             confFile.writeText(
                 """
                 [stream]
-                port = 1604
+                port = ${ports.streamPort}
 
                 [tcp]
-                port = 1605
+                port = ${ports.tcpPort}
 
                 [http]
-                port = 1680
+                port = ${ports.httpPort}
                 doc_root = $webUiPath
                 """.trimIndent() + "\n"
             )
