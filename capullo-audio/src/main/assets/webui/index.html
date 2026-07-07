@@ -530,7 +530,7 @@ class SnapAudio {
 
   _connect() {
     if (!this.running) return;
-    const url = 'ws://' + location.hostname + ':1680/stream';
+    const url = 'ws://' + location.host + '/stream';
     dbg('WS connect → ' + url, 'i');
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
@@ -905,7 +905,7 @@ function connect() {
   // onclose timer and the visibility handler.
   if (S.ws && (S.ws.readyState === 0 || S.ws.readyState === 1)) return;
   setStatus('ing');
-  const ws = new WebSocket('ws://' + location.hostname + ':1680/jsonrpc');
+  const ws = new WebSocket('ws://' + location.host + '/jsonrpc');
   S.ws = ws;
   ws.onopen  = () => { setStatus('conn'); rpc('Server.GetStatus', {}); flushPendingControl(); };
   ws.onclose = () => { setStatus('err'); setTimeout(connect, 3000); };
