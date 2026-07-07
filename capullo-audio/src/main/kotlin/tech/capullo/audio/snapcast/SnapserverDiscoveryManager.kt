@@ -16,6 +16,12 @@ data class DiscoveredSnapserver(
     val serviceType: String,
     val hostAddress: String,
     val port: Int,
+    /**
+     * The broadcaster's HTTP port (web player + JSON-RPC/WebSocket control), read from the service's
+     * `http` TXT attribute. Needed for listen-in control when the broadcaster uses OS-assigned ports
+     * (the port isn't a fixed convention anymore). Falls back to the legacy fixed port when absent.
+     */
+    val httpPort: Int = SnapserverDiscoveryManager.HTTP_SERVICE_PORT,
 )
 
 class SnapserverDiscoveryManager(context: Context) {
@@ -109,7 +115,10 @@ class SnapserverDiscoveryManager(context: Context) {
             if (host in localIps) return@mapNotNull null  // skip self
             val name = info.serviceName
                 .let { if (it.startsWith(SERVICE_NAME_PREFIX)) it.substring(SERVICE_NAME_PREFIX.length) else it }
-            DiscoveredSnapserver(name, info.serviceType, host, info.port)
+            val httpPort = info.attributes["http"]
+                ?.let { runCatching { String(it, Charsets.UTF_8).toInt() }.getOrNull() }
+                ?: HTTP_SERVICE_PORT
+            DiscoveredSnapserver(name, info.serviceType, host, info.port, httpPort)
         }
     }
 
@@ -120,5 +129,6 @@ class SnapserverDiscoveryManager(context: Context) {
         const val SERVICE_PORT = 1604
         const val STREAM_SERVICE_TYPE = "_snapcast-stream._tcp"
         const val STREAM_SERVICE_PORT = 1605
+        const val HTTP_SERVICE_PORT = 1680
     }
 }
