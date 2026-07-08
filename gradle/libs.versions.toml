@@ -18,6 +18,9 @@ libSnapcast = "78d1c48"
 # lib-media3-ffmpeg-android (Layer 0) via jitpack - prebuilt media3 decoder_ffmpeg AAR, pinned by
 # commit (like libSnapcast). Rebuilt/re-tagged only when media3 bumps (see that repo's BUILD_FFMPEG.md).
 libMedia3Ffmpeg = "31dcef4545"
+# Compose (for the :capullo-audio-ui module - shared client composables). BOM = org standard.
+composeBom = "2026.02.01"
+zxing = "3.5.3" # QR encoding for the shared ListenQrDialog (web-player address)
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
@@ -39,6 +42,16 @@ lib-snapcast-android = { module = "com.github.capullo-tech.lib-snapcast-android:
 # FFmpeg decoder AAR (Layer 0) - jitpack single-artifact coordinate (group = com.github.<org>).
 lib-media3-ffmpeg-android = { module = "com.github.capullo-tech:lib-media3-ffmpeg-android", version.ref = "libMedia3Ffmpeg" }
 
+# Compose (versions from the BOM) - consumed only by :capullo-audio-ui, not the headless engine.
+androidx-compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { module = "androidx.compose.ui:ui" }
+androidx-compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
+androidx-compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
+androidx-compose-foundation = { module = "androidx.compose.foundation:foundation" }
+androidx-compose-material3 = { module = "androidx.compose.material3:material3" }
+androidx-compose-material-icons-extended = { module = "androidx.compose.material:material-icons-extended" }
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxing" }
+
 junit = { module = "junit:junit", version.ref = "junit" }
 androidx-junit = { module = "androidx.test.ext:junit", version.ref = "androidxJunit" }
 androidx-espresso-core = { module = "androidx.test.espresso:espresso-core", version.ref = "espresso" }
@@ -47,3 +60,4 @@ androidx-espresso-core = { module = "androidx.test.espresso:espresso-core", vers
 android-library = { id = "com.android.library", version.ref = "agp" }
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
