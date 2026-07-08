@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>QuantumCast</title>
+<title>Capullo</title>
 <style>
 /* touch-action:manipulation disables double-tap-to-zoom everywhere (keeps
    single tap/scroll). Knob canvas (.kc) and sheet handle (#grab) override with
@@ -252,7 +252,7 @@ header{
 <body>
 <header>
   <span id="status"></span>
-  <span class="brand">QuantumCast</span>
+  <span class="brand">Capullo</span>
   <div class="h-right">
     <button id="audio-btn" class="hbtn" title="Listen on this device">
       <!-- Power plug - grey = not listening (unplugged), green .live = listening -->
@@ -561,7 +561,7 @@ class SnapAudio {
   _sendHello() {
     dbg('→ HELLO sent','i');
     const pay = JSON.stringify({
-      Arch:'web', ClientName:'QuantumCast Web',
+      Arch:'web', ClientName:'Capullo Web',
       // host.name is the fallback display name if config.name is ever lost -
       // use our chosen name, not location.hostname (which is the raw IP).
       HostName: QC.name,
@@ -1174,7 +1174,7 @@ function renderMeta() {
     });
   } else { tagsEl.dataset.mq = tagsKey; tagsEl.hidden = true; }
 
-  document.title = (S.pb.status === 'playing' && title !== '-') ? title + ' – QuantumCast' : 'QuantumCast';
+  document.title = (S.pb.status === 'playing' && title !== '-') ? title + ' – Capullo' : 'Capullo';
   renderShare();
   syncMediaSession();
 }
@@ -1188,7 +1188,7 @@ function syncMediaSession() {
   if (!('mediaSession' in navigator)) return;
   const m = S.meta, p = S.pb;
   const artist = Array.isArray(m.artist) ? (m.artist[0] || '') : (m.artist || '');
-  const title = m.title || m.station || 'QuantumCast';
+  const title = m.title || m.station || 'Capullo';
   const album = [S.serverName, (m.station && m.station !== m.title) ? m.station : '']
     .filter(Boolean).join(' - ');
   const artwork = [];
@@ -1245,7 +1245,7 @@ function renderCtrls() {
   $('bprev').hidden = !p.canPrev; $('bnext').hidden = !p.canNext;
   syncMediaSession();
   document.title = (p.status === 'playing' && (S.meta.title || S.meta.station))
-    ? (S.meta.title || S.meta.station) + ' – QuantumCast' : 'QuantumCast';
+    ? (S.meta.title || S.meta.station) + ' – Capullo' : 'Capullo';
 }
 
 
