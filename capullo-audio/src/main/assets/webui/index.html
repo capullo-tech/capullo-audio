@@ -199,18 +199,25 @@ header{
   text-transform:uppercase;letter-spacing:.07em;
   margin-bottom:12px;text-align:center;
 }
-#qr-row{display:flex;justify-content:flex-end;margin-bottom:8px}
+/* Reset (left) · QR (right) - app header parity */
+#qr-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
 #grp-row{display:flex;align-items:center;gap:7px;margin-bottom:16px}
 .gi{display:flex;align-items:center;color:#98A0B8}
 .gi svg{width:18px;height:18px;fill:currentColor}
 #grp-sl{flex:1;accent-color:#B9C3F8;height:20px;cursor:pointer}
-#qr-btn{
+#grp-sl:disabled{opacity:.4;cursor:not-allowed}
+#qr-btn,#reset-btn{
   width:34px;height:34px;border-radius:50%;border:none;flex-shrink:0;
   background:#2A3048;color:#B9C3F8;cursor:pointer;
   display:flex;align-items:center;justify-content:center;
 }
-#qr-btn svg{width:18px;height:18px;fill:currentColor;pointer-events:none}
-#qr-btn:active{background:#454E75}
+#qr-btn svg,#reset-btn svg{width:18px;height:18px;fill:currentColor;pointer-events:none}
+#qr-btn:active,#reset-btn:active{background:#454E75}
+/* Locked non-owner cards: dimmed + non-interactive (cooperative UI enforcement -
+   the real snapserver has no lock/ACL concept). Own card stays editable. */
+.cc-wrap.locked .cc,.cc-wrap.locked .cb{opacity:.45}
+.cc-wrap.locked .kc,.cc-wrap.locked .cb{pointer-events:none}
+.cc-wrap.locked .cn.me{pointer-events:none;text-decoration:none}
 #qrov{
   position:fixed;inset:0;z-index:300;background:rgba(6,8,16,.78);
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
@@ -258,15 +265,6 @@ header{
       <!-- Power plug - grey = not listening (unplugged), green .live = listening -->
       <svg viewBox="0 0 24 24"><path d="M16.01 7L16 3h-2v4h-4V3H8v4h-.01C7 6.99 6 7.99 6 8.99v5.49L9.5 18v3h5v-3l3.5-3.51V8.99c0-1-.99-1.99-1.99-1.99z"/></svg>
     </button>
-    <button id="clients-btn" class="hbtn" title="Snapcast clients">
-      <!-- Material surround_sound (app clients-sheet icon); center dot swaps
-           for the count of OTHER connected clients (self excluded) -->
-      <svg viewBox="0 0 24 24">
-        <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM7.76 16.24l-1.41 1.41C4.78 16.1 4 14.05 4 12c0-2.05.78-4.1 2.34-5.66l1.41 1.41C6.59 8.93 6 10.46 6 12s.59 3.07 1.76 4.24zm4.24-.24c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm5.66 1.66l-1.41-1.41C17.41 15.07 18 13.54 18 12s-.59-3.07-1.76-4.24l1.41-1.41C19.22 7.9 20 9.95 20 12c0 2.05-.78 4.1-2.34 5.66z"/>
-        <circle id="cc-dot" cx="12" cy="12" r="2"/>
-        <text id="cc-num" x="12" y="12.2" style="display:none">0</text>
-      </svg>
-    </button>
   </div>
 </header>
 
@@ -294,6 +292,15 @@ header{
   <div class="tags-row" id="row-tags" hidden></div>
   <div id="meta-gap"></div>
   <div id="controls">
+    <!-- Snapcast clients (o) - left of prev (app transport-row parity). center dot
+         swaps for the count of OTHER connected clients (self excluded). -->
+    <button id="clients-btn" class="hbtn" title="Snapcast clients">
+      <svg viewBox="0 0 24 24">
+        <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM7.76 16.24l-1.41 1.41C4.78 16.1 4 14.05 4 12c0-2.05.78-4.1 2.34-5.66l1.41 1.41C6.59 8.93 6 10.46 6 12s.59 3.07 1.76 4.24zm4.24-.24c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm5.66 1.66l-1.41-1.41C17.41 15.07 18 13.54 18 12s-.59-3.07-1.76-4.24l1.41-1.41C19.22 7.9 20 9.95 20 12c0 2.05-.78 4.1-2.34 5.66z"/>
+        <circle id="cc-dot" cx="12" cy="12" r="2"/>
+        <text id="cc-num" x="12" y="12.2" style="display:none">0</text>
+      </svg>
+    </button>
     <button id="bprev" class="ctrl" hidden></button>
     <button id="bplay" class="ctrl primary"></button>
     <button id="bnext" class="ctrl" hidden></button>
@@ -314,8 +321,12 @@ header{
   <div class="msheet">
     <div id="grab"><div class="mhandle"></div></div>
     <div class="mhead"></div>
-    <!-- QR sits in its own row above the volume bar (app layout parity) -->
+    <!-- Reset (left) · QR (right) - app header parity. Reset: tap = this device,
+         hold = all clients (→ stereo / 100% / 0ms). -->
     <div id="qr-row">
+      <button id="reset-btn" title="Reset this device (hold: reset all)">
+        <svg viewBox="0 0 24 24"><path d="M14 12c0-1.1-.9-2-2-2s-2 .9-2 2 .9 2 2 2 2-.9 2-2zm-2-9c-4.97 0-9 4.03-9 9H0l4 4 4-4H5c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.51 0-2.91-.49-4.06-1.3l-1.42 1.44C8.04 20.3 9.94 21 12 21c4.97 0 9-4.03 9-9s-4.03-9-9-9z"/></svg>
+      </button>
       <button id="qr-btn" title="QR code - listen on another device">
         <svg viewBox="0 0 24 24"><path d="M3 11h8V3H3v8zm2-6h4v4H5V5zM3 21h8v-8H3v8zm2-6h4v4H5v-4zM13 3v8h8V3h-8zm6 6h-4V5h4v4zM13 13h2v2h-2zm2 2h2v2h-2zm-2 2h2v2h-2zm2 2h2v2h-2zm2-2h2v2h-2zm0-4h2v2h-2zm2 2h2v2h-2zm0 4h2v2h-2z"/></svg>
       </button>
@@ -466,6 +477,7 @@ const S={
   svcIdx:0,
   pendingControl:[],  // Stream.Control commands queued while the control WS is closed (lockscreen)
   localPaused:false,  // user paused local listening via the lockscreen (stream-locked mode)
+  locked:false,       // broadcaster locked the stream → this client may edit only its OWN card
 };
 
 // ── Snapcast Binary Audio ─────────────────────────────────────────────────────
@@ -1033,8 +1045,11 @@ function applyProps(p) {
   S.pb.status   = p.playbackStatus || 'stopped';
   S.pb.canPlay  = !!p.canPlay; S.pb.canPause = !!p.canPause;
   S.pb.canNext  = !!p.canGoNext; S.pb.canPrev  = !!p.canGoPrevious;
+  // The plugin publishes canPlay=canPause=!locked, so both false ⇒ the broadcaster
+  // locked the stream. Gate this client's control of OTHER cards accordingly.
+  S.locked = !(S.pb.canPlay || S.pb.canPause);
   if (p.metadata) S.meta = p.metadata;
-  renderMeta(); renderCtrls();
+  renderMeta(); renderCtrls(); applyClientGating();
 }
 
 // ── Marquee helper ────────────────────────────────────────────────────────────
@@ -1577,8 +1592,63 @@ function renderClients() {
   for (const c of conn) if (!cur.has(c.id)) grid.appendChild(makeCard(c));
   for (const c of conn) updateCard(c);
   syncGrp();
+  applyClientGating();
   if (!$('modal').hidden) autoExpandSheet();   // a card arrived while open → grow
 }
+
+// Lock gating (task parity with the app sheet): when the broadcaster locks the
+// stream, this listening client may only edit its OWN card. Others go dim +
+// non-interactive (CSS .locked), and the group slider (which drives all clients)
+// is disabled. Purely cooperative - snapserver itself enforces no lock.
+function applyClientGating() {
+  const grid = $('card-grid');
+  [...grid.querySelectorAll('.cc-wrap')].forEach(w => {
+    w.classList.toggle('locked', S.locked && w.dataset.id !== CLIENT_ID);
+  });
+  const gs = $('grp-sl'); if (gs) gs.disabled = S.locked;
+}
+
+// ── Reset ───────────────────────────────────────────────────────────────────────
+// Reset a client to defaults: stereo / 100% / 0ms latency.
+function webResetClient(id) {
+  const c = S.clients[id]; if (!c) return;
+  c.config.volume = { percent: 100, muted: false };
+  rpc('Client.SetVolume', { id, volume: { percent: 100, muted: false } });
+  c.config.latency = 0;
+  rpc('Client.SetLatency', { id, latency: 0 });
+  if (id === CLIENT_ID) {
+    setOwnName(QC.name, 'S');   // channel → stereo, persisted + optimistic card + snapAudio
+  } else {
+    const nn = rawName(c).replace(/\s*\[[LRS]\]$/, '').trim() + ' [S]';
+    c.config.name = nn;
+    rpc('Client.SetName', { id, name: nn });
+  }
+  updateCard(c);
+}
+function webResetSelf() { webResetClient(CLIENT_ID); }
+function webResetAll() {
+  Object.values(S.clients).filter(c => c.connected).forEach(c => {
+    if (S.locked && c.id !== CLIENT_ID) return;   // locked ⇒ only our own row
+    webResetClient(c.id);
+  });
+  syncGrp();
+}
+// Tap = reset this device; hold (600ms) = reset all.
+(function() {
+  const btn = $('reset-btn'); if (!btn) return;
+  let lp = null, fired = false;
+  const clear = () => { if (lp) { clearTimeout(lp); lp = null; } };
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault(); fired = false;
+    lp = setTimeout(() => { fired = true; lp = null; webResetAll(); }, 600);
+  });
+  btn.addEventListener('pointerup', e => {
+    e.preventDefault();
+    if (lp) { clear(); if (!fired) webResetSelf(); }
+  });
+  btn.addEventListener('pointercancel', clear);
+  btn.addEventListener('pointerleave', clear);
+})();
 
 const cName  = c => { const r = rawName(c), m = r.match(/\s*\[([LRS])\]$/); return m ? (r.replace(/\s*\[[LRS]\]$/, '').trim() || c.host.name || c.host.ip) : r; };
 const cTag   = c => { const m = rawName(c).match(/\s*\[([LRS])\]$/); return m ? m[1] : null; };

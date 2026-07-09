@@ -7,6 +7,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -19,12 +20,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.QrCode
+import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.VolumeDown
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -47,7 +50,7 @@ import kotlin.math.sqrt
 
 private enum class KnobMode { LATENCY, VOLUME }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SnapcastControlSheet(
     groups: List<Group>,
@@ -59,6 +62,14 @@ fun SnapcastControlSheet(
     isBroadcaster: Boolean = false,
     isStreamLocked: Boolean = false,
     onToggleStreamLock: () -> Unit = {},
+    // This device's own snapclient id. When the stream is locked and this device is NOT the
+    // broadcaster, every card except this one is read-only (a non-server client may only touch
+    // its own row). Empty string ⇒ unknown ⇒ nothing is treated as "self".
+    localClientId: String = "",
+    // Broadcaster-only reset. Short press resets THIS device (own snapclient → stereo/100/0 and
+    // clears its persisted spatial role); long press resets EVERY connected client.
+    onResetSelf: () -> Unit = {},
+    onResetAll: () -> Unit = {},
     httpPort: Int = 1680,
     onDismiss: () -> Unit,
 ) {
@@ -96,29 +107,53 @@ fun SnapcastControlSheet(
             )
         },
     ) {
-        // QR share for everyone; stream lock (broadcaster only). Channel is now
-        // set per-card via the channel badge - the L/Stereo/R segment was removed.
+        // Reset (broadcaster only, left) · QR share for everyone + stream lock (broadcaster
+        // only) on the right. Channel is set per-card via the channel badge - the L/Stereo/R
+        // segment was removed. SpaceBetween keeps the QR/lock group right-aligned whether or
+        // not the left reset slot is present.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.End,
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = { showQr = true }, modifier = Modifier.size(40.dp)) {
-                Icon(
-                    imageVector = Icons.Default.QrCode,
-                    contentDescription = "Show listening address QR code",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
             if (isBroadcaster) {
-                IconButton(onClick = onToggleStreamLock, modifier = Modifier.size(40.dp)) {
+                // Short press = reset this device; long press = reset all clients. An IconButton
+                // can't distinguish long-press, so use a combinedClickable Box sized like one.
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .combinedClickable(onClick = onResetSelf, onLongClick = onResetAll),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Icon(
-                        imageVector = if (isStreamLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                        contentDescription = if (isStreamLocked) "Unlock stream control" else "Lock stream control",
-                        tint = if (isStreamLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        imageVector = Icons.Default.SettingsBackupRestore,
+                        contentDescription = "Reset this device (long-press: reset all)",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            } else {
+                // Keep SpaceBetween pushing the QR/lock group to the right edge.
+                Spacer(Modifier.size(1.dp))
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = { showQr = true }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        imageVector = Icons.Default.QrCode,
+                        contentDescription = "Show listening address QR code",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (isBroadcaster) {
+                    IconButton(onClick = onToggleStreamLock, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            imageVector = if (isStreamLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                            contentDescription = if (isStreamLocked) "Unlock stream control" else "Lock stream control",
+                            tint = if (isStreamLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }
@@ -146,8 +181,10 @@ fun SnapcastControlSheet(
         var lastGrpSentMs by remember { mutableStateOf(0L) }
 
         // Slim bar like the web player's group slider (thin track, small round
-        // thumb) instead of the tall M3 pill style
-        val sliderEnabled = connectedClients.isNotEmpty()
+        // thumb) instead of the tall M3 pill style. Disabled for a locked-out
+        // non-broadcaster - the group slider drives EVERY client, so leaving it live
+        // would bypass the per-card lock gating (parity with the web group slider).
+        val sliderEnabled = connectedClients.isNotEmpty() && !(isStreamLocked && !isBroadcaster)
         val sliderColor = (
             if (!isBroadcaster) {
                 MaterialTheme.colorScheme.error
@@ -321,6 +358,16 @@ fun SnapcastControlSheet(
                     } else {
                         rawName
                     }
+                    // Lock gating: when the stream is locked and this device is NOT the broadcaster,
+                    // only this device's OWN row is editable (server stays fully editable via its own
+                    // broadcaster sheet). Note this is COOPERATIVE - the real snapserver has no lock/ACL
+                    // concept, so this UI gate is the enforcement for our own clients.
+                    val isSelf = localClientId.isNotEmpty() && (
+                        client.id == localClientId ||
+                            client.id.contains(localClientId) ||
+                            localClientId.contains(client.id)
+                        )
+                    val editable = !(isStreamLocked && !isBroadcaster && !isSelf)
                     ClientCard(
                         name = displayName,
                         channelTag = channelTag,
@@ -328,6 +375,7 @@ fun SnapcastControlSheet(
                         volume = (dragClientVols[client.id]?.toFloat() ?: client.config.volume.percent.toFloat()) / 100f,
                         latency = client.config.latency,
                         isSnapclient = !isBroadcaster,
+                        editable = editable,
                         onVolumeChange = { percent ->
                             onClientVolumeChange(client.id, client.config.volume.muted, percent)
                         },
@@ -342,7 +390,7 @@ fun SnapcastControlSheet(
                         onLatencyChange = { latencyMs ->
                             onClientLatencyChange(client.id, latencyMs)
                         },
-                        onChannelCycle = if (channelTag != null) {
+                        onChannelCycle = if (channelTag != null && editable) {
                             {
                                 val nextChannel = when (channelTag) {
                                     "S" -> "left"
@@ -372,6 +420,7 @@ private fun ClientCard(
     volume: Float,
     latency: Int,
     isSnapclient: Boolean = false,
+    editable: Boolean = true,
     onVolumeChange: (Int) -> Unit,
     onMutedToggle: (Boolean, Int) -> Unit,
     onLatencyChange: (Int) -> Unit,
@@ -384,7 +433,11 @@ private fun ClientCard(
 
     Box {
         ElevatedCard(
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f),
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                // Locked non-owner rows read dimmed and non-interactive.
+                .then(if (editable) Modifier else Modifier.alpha(0.45f)),
             shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp, bottomEnd = 32.dp, bottomStart = 8.dp),
         ) {
             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -432,6 +485,7 @@ private fun ClientCard(
                             },
                             baseSize = knobBaseSize,
                             isSnapclient = isSnapclient,
+                            interactive = editable,
                         )
                     }
                 }
@@ -471,6 +525,7 @@ private fun ClientKnob(
     onMutedToggle: () -> Unit,
     baseSize: Dp = 124.dp,
     isSnapclient: Boolean = false,
+    interactive: Boolean = true,
 ) {
     val minLatency = -500
     val maxLatency = 1000
@@ -535,7 +590,8 @@ private fun ClientKnob(
                 center = Offset(size.width / 2f, size.height / 2f)
                 knobRadiusPx = minOf(size.width, size.height) / 2f
             }
-            .pointerInput(mode) {
+            .pointerInput(mode, interactive) {
+                if (!interactive) return@pointerInput
                 detectTapGestures(
                     onTap = { onModeToggle() },
                     onDoubleTap = {
@@ -552,7 +608,8 @@ private fun ClientKnob(
                     },
                 )
             }
-            .pointerInput(mode) {
+            .pointerInput(mode, interactive) {
+                if (!interactive) return@pointerInput
                 detectDragGesturesAfterLongPress(
                     onDragStart = {
                         isActive = true
