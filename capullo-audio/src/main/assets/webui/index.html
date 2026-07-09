@@ -149,6 +149,13 @@ header{
 .ctrl-cluster{flex:1;display:flex;align-items:center;gap:14px;min-width:0}
 .ctrl-cluster.left{justify-content:flex-end}
 .ctrl-cluster.right{justify-content:flex-start}
+/* Secondary control row (app-layout parity): snapcast (o) on the left, queue on the
+   right (future). Its own row BELOW the transport so (o) has a FIXED position and
+   never shifts with the transport buttons. min-height reserves the row even if empty. */
+#controls-secondary{
+  display:flex;justify-content:space-between;align-items:center;
+  gap:14px;margin-bottom:6px;min-height:34px;
+}
 .ctrl{
   width:48px;height:48px;border-radius:50%;border:none;
   background:#232838;color:#E4E7F2;
@@ -302,24 +309,29 @@ header{
   <div class="tags-row" id="row-tags" hidden></div>
   <div id="meta-gap"></div>
   <div id="controls">
-    <!-- Left cluster: snapcast clients (o) + prev. Right-aligned so it hugs the
-         always-centered primary button from the left (app transport-row parity).
-         (o) centre dot swaps for the count of OTHER connected clients (self excluded). -->
+    <!-- Left cluster: prev (+ future up/down/shuffle). Right-aligned so it hugs the
+         always-centered primary button from the left. -->
     <div class="ctrl-cluster left">
-      <button id="clients-btn" class="hbtn" title="Snapcast clients">
-        <svg viewBox="0 0 24 24">
-          <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM7.76 16.24l-1.41 1.41C4.78 16.1 4 14.05 4 12c0-2.05.78-4.1 2.34-5.66l1.41 1.41C6.59 8.93 6 10.46 6 12s.59 3.07 1.76 4.24zm4.24-.24c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm5.66 1.66l-1.41-1.41C17.41 15.07 18 13.54 18 12s-.59-3.07-1.76-4.24l1.41-1.41C19.22 7.9 20 9.95 20 12c0 2.05-.78 4.1-2.34 5.66z"/>
-          <circle id="cc-dot" cx="12" cy="12" r="2"/>
-          <text id="cc-num" x="12" y="12.2" style="display:none">0</text>
-        </svg>
-      </button>
       <button id="bprev" class="ctrl" hidden></button>
     </div>
     <button id="bplay" class="ctrl primary"></button>
-    <!-- Right cluster: next (+ future repeat/queue). Left-aligned, mirrors the left. -->
+    <!-- Right cluster: next (+ future repeat). Left-aligned, mirrors the left. -->
     <div class="ctrl-cluster right">
       <button id="bnext" class="ctrl" hidden></button>
     </div>
+  </div>
+  <!-- Secondary row (app-layout parity): snapcast clients (o) on the left, always in a
+       fixed position BELOW the transport regardless of which transport buttons are
+       present (future: queue list on the right). (o) centre dot swaps for the count of
+       OTHER connected clients (self excluded). -->
+  <div id="controls-secondary">
+    <button id="clients-btn" class="hbtn" title="Snapcast clients">
+      <svg viewBox="0 0 24 24">
+        <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM7.76 16.24l-1.41 1.41C4.78 16.1 4 14.05 4 12c0-2.05.78-4.1 2.34-5.66l1.41 1.41C6.59 8.93 6 10.46 6 12s.59 3.07 1.76 4.24zm4.24-.24c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4zm5.66 1.66l-1.41-1.41C17.41 15.07 18 13.54 18 12s-.59-3.07-1.76-4.24l1.41-1.41C19.22 7.9 20 9.95 20 12c0 2.05-.78 4.1-2.34 5.66z"/>
+        <circle id="cc-dot" cx="12" cy="12" r="2"/>
+        <text id="cc-num" x="12" y="12.2" style="display:none">0</text>
+      </svg>
+    </button>
   </div>
 </div>
 
