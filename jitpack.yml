@@ -1,7 +1,10 @@
-# jitpack builds & publishes only the library module (the :app harness is dev-only).
-# Resolves contracts from jitpack (com.github.capullo-tech:capullo-audio-contracts) and
-# lib-snapcast-android from jitpack; needs the Android SDK, which jitpack provides.
+# jitpack builds & publishes the two library modules (the :app harness is dev-only):
+#   com.github.capullo-tech:capullo-audio      (headless engine)
+#   com.github.capullo-tech:capullo-audio-ui   (shared Compose control sheet; api-depends on the engine)
+# Both are published in one build so capullo-audio-ui's POM dep on capullo-audio resolves to the same
+# commit version. Resolves contracts + lib-snapcast-android from jitpack; needs the Android SDK, which
+# jitpack provides.
 jdk:
   - openjdk17
 install:
-  - ./gradlew :capullo-audio:publishToMavenLocal -x test -x lint
+  - ./gradlew :capullo-audio:publishToMavenLocal :capullo-audio-ui:publishToMavenLocal -x test -x lint
