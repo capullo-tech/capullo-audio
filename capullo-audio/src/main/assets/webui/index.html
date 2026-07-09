@@ -155,6 +155,9 @@ header{
 #controls-secondary{
   display:flex;justify-content:space-between;align-items:center;
   gap:14px;margin-bottom:6px;min-height:34px;
+  /* Inset (o)/queue from the screen edge to match the native app's bottom row
+     (app snapcontrol sits ~40px in, not flush to the edge). */
+  padding:0 24px;
 }
 .ctrl{
   width:48px;height:48px;border-radius:50%;border:none;
