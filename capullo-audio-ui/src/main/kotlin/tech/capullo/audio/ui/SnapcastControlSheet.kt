@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -93,6 +94,11 @@ fun SnapcastControlSheet(
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
+        // Darken the backdrop to match the web player's snapcontrol overlay
+        // (`.mbg { background: rgba(0,0,0,.65) }`). The M3 default scrim is much
+        // lighter; the callers additionally blur their own content behind the sheet
+        // (web `backdrop-filter: blur`), which the sheet's own window can't reach.
+        scrimColor = Color.Black.copy(alpha = 0.6f),
         // Compact handle: the default M3 one pads 22dp top+bottom, pushing the
         // QR/lock row far down (web parity: slim grab bar close to content)
         dragHandle = {
@@ -498,7 +504,10 @@ private fun ClientCard(
                     .align(Alignment.TopEnd)
                     .padding(top = 12.dp, end = 12.dp)
                     .size(28.dp)
-                    .background(MaterialTheme.colorScheme.error, CircleShape)
+                    // Clip BEFORE clickable so the tap ripple is bounded to the circle
+                    // (without this the indication draws as a square around the badge).
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.error)
                     .then(if (onChannelCycle != null) Modifier.clickable(onClick = onChannelCycle) else Modifier),
                 contentAlignment = Alignment.Center,
             ) {
