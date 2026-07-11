@@ -27,6 +27,15 @@ class SnapserverProcess(
      * Read back off [ports] to wire NSD / the listen-in URL / the local snapclient / control client.
      */
     val ports: SnapserverPorts = SnapserverPorts.Fixed,
+    /**
+     * Name of the Linux **abstract** Unix socket the control plane uses - snapserver spawns
+     * libsnapcontrol.so with `--socket-name=<this>`, and it must equal the name the paired
+     * [SnapcontrolPlugin] binds. Abstract sockets are device-global, so two capullo apps
+     * broadcasting on one device collide on the default `"snapcontrol"`; pass a per-app value
+     * (see [controlSocketName]) to both this and the plugin. Read it back off this property and
+     * feed it into the plugin so binder == connector is structurally guaranteed.
+     */
+    val controlSocketName: String = DEFAULT_CONTROL_SOCKET_NAME,
 ) {
 
     private val nativeLibDir: String = context.applicationInfo.nativeLibraryDir
@@ -38,6 +47,17 @@ class SnapserverProcess(
 
     companion object {
         const val DEFAULT_STREAM_NAME = "Capullo"
+        const val DEFAULT_CONTROL_SOCKET_NAME = "snapcontrol"
+
+        /**
+         * Per-app control-socket name so two capullo apps on one device don't collide on the
+         * device-global Linux abstract namespace. Pass the SAME value to both [SnapserverProcess]
+         * (this ctor's `controlSocketName`) and the paired [SnapcontrolPlugin]. `packageName` is
+         * unique per installed app (incl. `.clone`) and abstract-socket/URI-safe (`[A-Za-z0-9_.]`).
+         */
+        fun controlSocketName(context: Context): String =
+            "$DEFAULT_CONTROL_SOCKET_NAME.${context.packageName}"
+
         private const val PIPE_NAME = "filifo"
         private const val CODEC = "codec=pcm"
         private const val PIPE_MODE = "mode=read"
@@ -66,6 +86,10 @@ class SnapserverProcess(
     private val pipeArgs = listOf(
         streamNameArg, CODEC, PIPE_MODE, DRYOUT_MS, SAMPLE_FORMAT,
         "controlscript=$nativeLibDir/libsnapcontrol.so",
+        // snapserver forwards controlscriptparams verbatim into libsnapcontrol.so's argv, where
+        // main.cpp parses --socket-name=. The value is a single no-space token; the StreamUri query
+        // parser splits on '&' then the FIRST '=', so the inner '=' survives into the value.
+        "controlscriptparams=--socket-name=$controlSocketName",
     ).joinToString("&")
 
     private fun createFifo(): String {

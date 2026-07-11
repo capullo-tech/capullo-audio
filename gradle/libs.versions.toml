@@ -14,7 +14,7 @@ espresso = "3.6.1"
 # substitutes this with the sibling project when it's checked out next to this repo.
 contracts = "main-SNAPSHOT"
 # lib-snapcast-android via jitpack (public build, no token) - same coordinate the apps use.
-libSnapcast = "78d1c48"
+libSnapcast = "7e7c272"
 # lib-media3-ffmpeg-android (Layer 0) via jitpack - prebuilt media3 decoder_ffmpeg AAR, pinned by
 # commit (like libSnapcast). Rebuilt/re-tagged only when media3 bumps (see that repo's BUILD_FFMPEG.md).
 libMedia3Ffmpeg = "31dcef4545"

@@ -40,7 +40,7 @@ import java.io.IOException
 import java.io.InputStreamReader
 
 private const val TAG = "SnapcontrolPlugin"
-private const val SOCKET_NAME = "snapcontrol"
+private const val DEFAULT_SOCKET_NAME = "snapcontrol"
 private const val NOTIFY_READY = """{"jsonrpc":"2.0","method":"Plugin.Stream.Ready"}"""
 
 /**
@@ -77,6 +77,13 @@ class SnapcontrolPlugin(
     private val controller: PlaybackController,
     parentJob: Job,
     private val mapper: SnapcontrolMetadataMapper = SnapcontrolMetadataMapper(),
+    /**
+     * Abstract Unix socket name to bind - MUST equal the paired [SnapserverProcess.controlSocketName]
+     * (feed `snapserver.controlSocketName` here). Default `"snapcontrol"` matches
+     * [SnapserverProcess.DEFAULT_CONTROL_SOCKET_NAME]; pass a per-app value so two capullo apps on
+     * one device don't collide on this device-global name.
+     */
+    private val socketName: String = DEFAULT_SOCKET_NAME,
 ) {
     private val pluginJob = SupervisorJob(parentJob)
     private val scope = CoroutineScope(Dispatchers.IO + pluginJob)
@@ -91,12 +98,12 @@ class SnapcontrolPlugin(
     fun start() {
         if (listener != null) return
         listener = try {
-            LocalServerSocket(SOCKET_NAME)
+            LocalServerSocket(socketName)
         } catch (e: IOException) {
-            Log.e(TAG, "Failed to bind abstract:$SOCKET_NAME - is another instance running?", e)
+            Log.e(TAG, "Failed to bind abstract:$socketName - is another instance running?", e)
             return
         }
-        Log.d(TAG, "Listening on abstract:$SOCKET_NAME")
+        Log.d(TAG, "Listening on abstract:$socketName")
         scope.launch { acceptLoop() }
     }
 

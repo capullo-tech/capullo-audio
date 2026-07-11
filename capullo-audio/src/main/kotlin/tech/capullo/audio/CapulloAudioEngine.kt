@@ -45,7 +45,12 @@ public class CapulloAudioEngine(
     /** Bring up snapserver (creates the FIFO), the playback loop, the control plugin, and metadata
      *  forwarding. Call before [play]/[playQueue]. */
     public fun startBroadcast(parentJob: Job) {
-        val server = SnapserverProcess(context, streamName).also { snapserver = it }
+        // Per-app abstract control-socket name (avoids the device-global "snapcontrol" collision when
+        // two capullo apps broadcast at once). Feed the SAME value into the plugin below.
+        val server = SnapserverProcess(
+            context, streamName,
+            controlSocketName = SnapserverProcess.controlSocketName(context),
+        ).also { snapserver = it }
         scope.launch { server.start() }
 
         // The FIFO exists as soon as SnapserverProcess is constructed (mkfifo in its init).
@@ -55,7 +60,10 @@ public class CapulloAudioEngine(
 
         // The plugin reads the OVERLAID flow (source metadata + the engine's real clock), both in its
         // constructor and on every GetProperties - so both wiring points must be the overlaid flow.
-        val p = SnapcontrolPlugin(playbackLoop.nowPlaying, controller, parentJob).also { plugin = it }
+        val p = SnapcontrolPlugin(
+            playbackLoop.nowPlaying, controller, parentJob,
+            socketName = server.controlSocketName,
+        ).also { plugin = it }
         p.start()
 
         // Push every overlaid now-playing change out to web players / snapclients…
