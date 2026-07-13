@@ -45,7 +45,7 @@ android {
 
 dependencies {
     // Layer 1 SPI (the only thing apps also see through this engine's api surface).
-    api(libs.capullo.audio.contracts)
+    api(pins.capullo.audio.contracts)
 
     // Media3 delivery pipeline. exoplayer + common are `api`: the public surface exposes their types
     // (CapulloAudioEngine is @UnstableApi, toMediaItem() returns MediaItem, FifoRenderersFactory :
@@ -60,10 +60,10 @@ dependencies {
     // EXTENSION_RENDERER_MODE_ON). Runtime-only: DefaultRenderersFactory loads FfmpegAudioRenderer
     // reflectively off the classpath - never referenced at compile time. `implementation` on this
     // library still propagates the .so transitively into the consuming app for packaging.
-    implementation(libs.lib.media3.ffmpeg.android)
+    implementation(pins.lib.media3.ffmpeg.android)
 
     // Snapcast native binaries (libsnapserver.so / libsnapclient.so / libsnapcontrol.so).
-    implementation(libs.lib.snapcast.android)
+    implementation(pins.lib.snapcast.android)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)

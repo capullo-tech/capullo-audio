@@ -35,7 +35,7 @@ android {
 dependencies {
     implementation(project(":capullo-audio"))
     // The engine pulls this transitively; declared here too so the .so is unambiguously packaged.
-    implementation(libs.lib.snapcast.android)
+    implementation(pins.lib.snapcast.android)
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
 }

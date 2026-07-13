@@ -16,7 +16,13 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven { url = uri("https://jitpack.io") } // lib-snapcast-android (public native build)
+        maven { url = uri("https://jitpack.io") } // lib-snapcast-android + build-conventions catalog (public)
+    }
+    versionCatalogs {
+        // Shared org toolchain, pinned by commit from jitpack.
+        create("libs") { from("com.github.capullo-tech:build-conventions:b07e979") }
+        // Local pins: inter-repo capullo/L0 coordinates versioned independently per release.
+        create("pins") { from(files("gradle/pins.versions.toml")) }
     }
 }
 
