@@ -58,14 +58,11 @@ class SnapclientProcess(private val context: Context) {
     }
 
     private fun loadHostId(fresh: Boolean = false): String {
-        val prefs = context.getSharedPreferences("SNAPCAST_CLIENT_HOST_ID", Context.MODE_PRIVATE)
-        if (fresh) prefs.edit { remove("SNAPCAST_CLIENT_HOST_ID_PREFERENCE") }
-        return prefs.getString("SNAPCAST_CLIENT_HOST_ID_PREFERENCE", null) ?: run {
-            val id = UUID.randomUUID().toString()
-            prefs.edit { putString("SNAPCAST_CLIENT_HOST_ID_PREFERENCE", id) }
-            Log.d(TAG, "Generated new hostId: $id")
-            id
+        if (fresh) {
+            context.getSharedPreferences("SNAPCAST_CLIENT_HOST_ID", Context.MODE_PRIVATE)
+                .edit { remove("SNAPCAST_CLIENT_HOST_ID_PREFERENCE") }
         }
+        return localHostId(context)
     }
 
     suspend fun start(
@@ -117,9 +114,16 @@ class SnapclientProcess(private val context: Context) {
 
         /** The persistent --hostID this device's snapclient registers with -
          *  equals its client id on any snapserver (used to exclude self from
-         *  connected-client counts). Empty until the first client run. */
-        fun localHostId(context: Context): String =
-            context.getSharedPreferences("SNAPCAST_CLIENT_HOST_ID", Context.MODE_PRIVATE)
-                .getString("SNAPCAST_CLIENT_HOST_ID_PREFERENCE", null) ?: ""
+         *  connected-client counts). Generated + persisted on first read, so the
+         *  UI has a stable self-id even before the first client run (otherwise a
+         *  cold first launch mis-counts self as an "other" / hides the self card). */
+        fun localHostId(context: Context): String {
+            val prefs = context.getSharedPreferences("SNAPCAST_CLIENT_HOST_ID", Context.MODE_PRIVATE)
+            return prefs.getString("SNAPCAST_CLIENT_HOST_ID_PREFERENCE", null) ?: run {
+                val id = UUID.randomUUID().toString()
+                prefs.edit { putString("SNAPCAST_CLIENT_HOST_ID_PREFERENCE", id) }
+                id
+            }
+        }
     }
 }
