@@ -43,6 +43,16 @@ class SnapserverDiscoveryManager(context: Context) {
     private val resolveListeners = mutableMapOf<String, NsdManager.ResolveListener>()
     private val resolvedInfos = mutableMapOf<String, NsdServiceInfo>()
 
+    // The legacy NsdManager.resolveService handles only ONE resolution at a time - a second overlapping
+    // resolve fails with FAILURE_ALREADY_ACTIVE (error 3). Since each broadcaster is found under two
+    // service types (and there can be several broadcasters), concurrent resolves collide; if the losing
+    // one is the `_snapcast._tcp` (stream) record the row never appears. Serialize resolves (one in
+    // flight, the rest queued) so every record resolves. Guarded by [resolveLock] because NSD found /
+    // resolve callbacks may arrive on different threads.
+    private val resolveLock = Any()
+    private val resolveQueue = ArrayDeque<Pair<String, NsdServiceInfo>>()
+    private var resolveInFlight = false
+
     private fun keyOf(originType: String, serviceName: String) = "$originType|$serviceName"
 
     fun startDiscovery() {
@@ -67,6 +77,10 @@ class SnapserverDiscoveryManager(context: Context) {
         }
         resolveListeners.clear()
         resolvedInfos.clear()
+        synchronized(resolveLock) {
+            resolveQueue.clear()
+            resolveInFlight = false
+        }
         _discoveredServers.value = emptyList()
     }
 
@@ -81,7 +95,7 @@ class SnapserverDiscoveryManager(context: Context) {
 
             override fun onServiceFound(service: NsdServiceInfo) {
                 resolvedInfos[keyOf(originType, service.serviceName)] = service
-                resolve(service, originType)
+                enqueueResolve(originType, service)
             }
 
             override fun onServiceLost(service: NsdServiceInfo) {
@@ -93,18 +107,36 @@ class SnapserverDiscoveryManager(context: Context) {
         nsdManager.discoverServices(originType, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
-    private fun resolve(info: NsdServiceInfo, originType: String) {
+    private fun enqueueResolve(originType: String, info: NsdServiceInfo) {
+        synchronized(resolveLock) { resolveQueue.addLast(originType to info) }
+        pumpResolve()
+    }
+
+    // Start the next queued resolve only if none is in flight; the resolve callbacks call back in to
+    // pump the following one, so exactly one resolveService runs at a time.
+    private fun pumpResolve() {
+        val next = synchronized(resolveLock) {
+            if (resolveInFlight) return
+            val n = resolveQueue.removeFirstOrNull() ?: return
+            resolveInFlight = true
+            n
+        }
+        val (originType, info) = next
         val key = keyOf(originType, info.serviceName)
         val listener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.e(TAG, "Resolve failed for ${serviceInfo.serviceName}: $errorCode")
                 resolveListeners.remove(key)
+                synchronized(resolveLock) { resolveInFlight = false }
+                pumpResolve()
             }
 
             override fun onServiceResolved(resolved: NsdServiceInfo) {
                 resolveListeners.remove(key)
                 resolvedInfos[keyOf(originType, resolved.serviceName)] = resolved
                 rebuildList()
+                synchronized(resolveLock) { resolveInFlight = false }
+                pumpResolve()
             }
         }
         resolveListeners[key] = listener
