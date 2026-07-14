@@ -377,7 +377,7 @@ header{
 
 // Bump on every webui change - shown in debug panel so a stale browser cache
 // is immediately visible (Android Chrome heuristically caches this page).
-const UI_VERSION = 'v31';
+const UI_VERSION = 'v32';
 function lsGet(k) { try { return localStorage.getItem(k); } catch(_) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch(_) {} }
 
@@ -992,14 +992,19 @@ function localResume() {
 // clients) and otherwise start/resume on the very first interaction anywhere.
 function armAutoplay() {
   const tryStart = () => {
-    if (!snapAudio) startLocalAudio();
-    else if (snapAudio.ctx && snapAudio.ctx.state === 'suspended') snapAudio.ctx.resume().catch(() => {});
+    if (!snapAudio) { startLocalAudio(); return; }
+    if (snapAudio.ctx && snapAudio.ctx.state === 'suspended') snapAudio.ctx.resume().catch(() => {});
+    // iOS blocks the initial (gesture-less) mediaEl.play(), leaving the plug green but silent.
+    // Replay it here so the first user interaction (a gesture) actually starts the audio.
+    if (snapAudio.mediaEl && snapAudio.mediaEl.paused) snapAudio.mediaEl.play().catch(() => {});
   };
+  // Audio is truly flowing only when the context runs AND (on iOS) the element is playing.
+  const flowing = () => snapAudio && snapAudio.ctx && snapAudio.ctx.state === 'running' &&
+    (!snapAudio.mediaEl || !snapAudio.mediaEl.paused);
   const evs = ['pointerdown', 'keydown', 'touchstart'];
   const onGesture = () => {
     tryStart();
-    if (snapAudio && snapAudio.ctx && snapAudio.ctx.state === 'running')
-      evs.forEach(ev => window.removeEventListener(ev, onGesture));
+    if (flowing()) evs.forEach(ev => window.removeEventListener(ev, onGesture));
   };
   tryStart();
   evs.forEach(ev => window.addEventListener(ev, onGesture, { passive: true }));
@@ -1250,11 +1255,12 @@ function renderMeta() {
   const urlEl = $('row-url');
   if (m.url) {
     urlEl.hidden = false; urlEl.innerHTML = '';
-    const a = document.createElement('a');
-    a.href = m.url; a.target = '_blank'; a.rel = 'noopener';
-    a.style.cssText = 'overflow:hidden;text-overflow:ellipsis;display:block;white-space:nowrap';
-    a.textContent = m.url.replace(/^https?:\/\//, '').replace(/\?.*/, '');
-    urlEl.appendChild(a);
+    // Plain, non-clickable text. It used to be an <a target="_blank">, so a tap on the
+    // now-playing (e.g. to start audio) navigated to the raw source stream in a new tab.
+    const s = document.createElement('span');
+    s.style.cssText = 'overflow:hidden;text-overflow:ellipsis;display:block;white-space:nowrap';
+    s.textContent = m.url.replace(/^https?:\/\//, '').replace(/\?.*/, '');
+    urlEl.appendChild(s);
   } else urlEl.hidden = true;
 
   // Tags row - single-line marquee
@@ -2088,7 +2094,6 @@ function setStatus(c) { const el = $('status'); el.className = c; el.innerHTML =
 $('bprev').innerHTML = ICO_PREV;
 $('bnext').innerHTML = ICO_NEXT;
 $('bplay').innerHTML = ICO_PLAY;
-dbg('webui ' + UI_VERSION, 'ok');
 connect();
 </script>
 </body>
