@@ -58,18 +58,16 @@ import tech.capullo.audio.snapcast.DiscoveredSnapserver
 //
 // Ports are DYNAMIC: broadcasters bind OS-assigned ephemeral ports (ServerSocket(0)) and advertise
 // them over NSD, so a discovered server is always joined on its advertised [DiscoveredSnapserver.port]
-// / [DiscoveredSnapserver.httpPort]. [fallbackStreamPort]/[fallbackHttpPort] are ONLY the manual-entry
-// fallback - the stream port assumed when a user types a bare host with no ":port", plus a best-guess
-// http/control port the remote may not actually use. Against a real dynamic-port broadcaster a bare
-// host won't match, so manual entry realistically needs `host:port` typed; the fallback only helps a
-// legacy fixed-port server. Each app supplies its own fallback (QC 1604/1680, TC 1804/1880).
+// / [DiscoveredSnapserver.httpPort]. For MANUAL entry the one port a user knows is the HTTP port from
+// the web-player URL (e.g. `<device-ip>:<port>`), NOT the hidden random stream port - so manual entry
+// passes the typed port through as-is ([onJoinManual]'s `typedPort`, null for a bare host) and lets the
+// app resolve the real stream port from it (fetch `listen.json` off the HTTP port; fall back to the
+// typed port as a direct stream port for a legacy fixed-port / stock server). The app owns the fallback.
 @Composable
 fun LocalRadiosSection(
     servers: List<DiscoveredSnapserver>,
     onJoinServer: (DiscoveredSnapserver) -> Unit,
-    onJoinManual: (host: String, port: Int, httpPort: Int) -> Unit,
-    fallbackStreamPort: Int,
-    fallbackHttpPort: Int,
+    onJoinManual: (host: String, typedPort: Int?) -> Unit,
     initialManualHost: String = "",
     onClearManualHost: () -> Unit = {},
 ) {
@@ -117,10 +115,12 @@ fun LocalRadiosSection(
                         val input = manualInput.trim()
                         if (input.isEmpty()) return
                         val host = input.substringBefore(":")
-                        // Manual entry can't know the remote's dynamic ports; fall back to the
-                        // app's convention (stream from host:port if typed, http a best guess).
-                        val port = input.substringAfter(":", "").toIntOrNull() ?: fallbackStreamPort
-                        onJoinManual(host, port, fallbackHttpPort)
+                        // Pass the typed port straight through (null for a bare host). The app treats it
+                        // as the HTTP port (resolve the stream port via listen.json) and falls back to a
+                        // direct stream port if that fails - it can't be decided here (needs a network
+                        // fetch), so this composable stays synchronous.
+                        val typedPort = input.substringAfter(":", "").toIntOrNull()
+                        onJoinManual(host, typedPort)
                     }
                     OutlinedTextField(
                         value = manualInput,

@@ -68,6 +68,7 @@ class SnapserverProcess(
 
     init {
         copyWebUiAsset()
+        writeListenInfo()
     }
 
     private fun copyWebUiAsset() {
@@ -80,6 +81,22 @@ class SnapserverProcess(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to copy WebUI: ${e.message}")
+        }
+    }
+
+    // The stream port is OS-assigned (see [SnapserverPorts.free]) and appears nowhere on the HTTP /
+    // JSON-RPC surface - the web URL only exposes the HTTP port. A snapclient needs the raw-TCP stream
+    // port, which a cross-network listener otherwise can't know. Publish the resolved ports as a tiny
+    // `listen.json` in the served doc_root (next to index.html), so a listener who knows only the HTTP
+    // port (from the web URL / QR) can GET `http://host:httpPort/listen.json` and learn the stream port.
+    private fun writeListenInfo() {
+        try {
+            val webuiDir = File(context.filesDir, "webui").apply { mkdirs() }
+            File(webuiDir, "listen.json").writeText(
+                """{"streamPort":${ports.streamPort},"tcpPort":${ports.tcpPort},"httpPort":${ports.httpPort}}"""
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to write listen.json: ${e.message}")
         }
     }
 

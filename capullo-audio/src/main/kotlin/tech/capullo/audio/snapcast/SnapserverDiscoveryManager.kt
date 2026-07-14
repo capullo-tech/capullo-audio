@@ -32,8 +32,18 @@ class SnapserverDiscoveryManager(context: Context) {
     val discoveredServers: StateFlow<List<DiscoveredSnapserver>> = _discoveredServers.asStateFlow()
 
     private val discoveryListeners = mutableListOf<NsdManager.DiscoveryListener>()
+
+    // A capullo broadcaster advertises the SAME service name under TWO service types - `_snapcast._tcp`
+    // (whose `port` is the client-facing STREAM port) and `_snapcast-stream._tcp` (whose `port` is the
+    // JSON-RPC/control port). Keying purely by service name lets the second-resolved record clobber the
+    // first, so a listener could end up dialing the CONTROL port as if it were the stream port (TCP
+    // connects to the open control socket, then the snapcast hello handshake times out - silent no-audio).
+    // Key by the ORIGINATING service type + name so the two records coexist, then surface rows strictly
+    // from the `_snapcast._tcp` (stream) record in [rebuildList].
     private val resolveListeners = mutableMapOf<String, NsdManager.ResolveListener>()
     private val resolvedInfos = mutableMapOf<String, NsdServiceInfo>()
+
+    private fun keyOf(originType: String, serviceName: String) = "$originType|$serviceName"
 
     fun startDiscovery() {
         startFor(SERVICE_TYPE)
@@ -60,7 +70,7 @@ class SnapserverDiscoveryManager(context: Context) {
         _discoveredServers.value = emptyList()
     }
 
-    private fun startFor(serviceType: String) {
+    private fun startFor(originType: String) {
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) = Unit
             override fun onDiscoveryStopped(serviceType: String) = Unit
@@ -70,33 +80,34 @@ class SnapserverDiscoveryManager(context: Context) {
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
 
             override fun onServiceFound(service: NsdServiceInfo) {
-                resolvedInfos[service.serviceName] = service
-                resolve(service)
+                resolvedInfos[keyOf(originType, service.serviceName)] = service
+                resolve(service, originType)
             }
 
             override fun onServiceLost(service: NsdServiceInfo) {
-                resolvedInfos.remove(service.serviceName)
+                resolvedInfos.remove(keyOf(originType, service.serviceName))
                 rebuildList()
             }
         }
         discoveryListeners.add(listener)
-        nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
+        nsdManager.discoverServices(originType, NsdManager.PROTOCOL_DNS_SD, listener)
     }
 
-    private fun resolve(info: NsdServiceInfo) {
+    private fun resolve(info: NsdServiceInfo, originType: String) {
+        val key = keyOf(originType, info.serviceName)
         val listener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.e(TAG, "Resolve failed for ${serviceInfo.serviceName}: $errorCode")
-                resolveListeners.remove(serviceInfo.serviceName)
+                resolveListeners.remove(key)
             }
 
             override fun onServiceResolved(resolved: NsdServiceInfo) {
-                resolveListeners.remove(resolved.serviceName)
-                resolvedInfos[resolved.serviceName] = resolved
+                resolveListeners.remove(key)
+                resolvedInfos[keyOf(originType, resolved.serviceName)] = resolved
                 rebuildList()
             }
         }
-        resolveListeners[info.serviceName] = listener
+        resolveListeners[key] = listener
         nsdManager.resolveService(info, listener)
     }
 
@@ -110,16 +121,22 @@ class SnapserverDiscoveryManager(context: Context) {
 
     private fun rebuildList() {
         val localIps = localIpAddresses()
-        _discoveredServers.value = resolvedInfos.values.mapNotNull { info ->
-            val host = info.host?.hostAddress ?: return@mapNotNull null
-            if (host in localIps) return@mapNotNull null  // skip self
-            val name = info.serviceName
-                .let { if (it.startsWith(SERVICE_NAME_PREFIX)) it.substring(SERVICE_NAME_PREFIX.length) else it }
-            val httpPort = info.attributes["http"]
-                ?.let { runCatching { String(it, Charsets.UTF_8).toInt() }.getOrNull() }
-                ?: HTTP_SERVICE_PORT
-            DiscoveredSnapserver(name, info.serviceType, host, info.port, httpPort)
-        }
+        // Build rows STRICTLY from the `_snapcast._tcp` records - their `port` is the stream port a
+        // snapclient must dial. The `_snapcast-stream._tcp` records (control port) are supplemental and
+        // never used to source a row (they would poison the dial target). The `http` TXT rides on the
+        // stream record too, so nothing is lost. One row per broadcaster (records are keyed per type).
+        _discoveredServers.value = resolvedInfos.entries
+            .filter { it.key.startsWith("$SERVICE_TYPE|") }
+            .mapNotNull { (_, info) ->
+                val host = info.host?.hostAddress ?: return@mapNotNull null
+                if (host in localIps) return@mapNotNull null // skip self
+                val name = info.serviceName
+                    .let { if (it.startsWith(SERVICE_NAME_PREFIX)) it.substring(SERVICE_NAME_PREFIX.length) else it }
+                val httpPort = info.attributes["http"]
+                    ?.let { runCatching { String(it, Charsets.UTF_8).toInt() }.getOrNull() }
+                    ?: HTTP_SERVICE_PORT
+                DiscoveredSnapserver(name, info.serviceType, host, info.port, httpPort)
+            }
     }
 
     companion object {
