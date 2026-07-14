@@ -341,7 +341,7 @@ header{
 <!-- Audio debug panel -->
 <div id="dbg">
   <div id="dbg-head" onclick="document.getElementById('dbg-body').classList.toggle('open')">
-    <span>Audio Debug <span id="dbg-ver"></span></span><span id="dbg-summary">tap to expand</span>
+    <span>Audio Debug</span><span id="dbg-summary">tap to expand</span>
   </div>
   <div id="dbg-body"></div>
 </div>
@@ -377,7 +377,7 @@ header{
 
 // Bump on every webui change - shown in debug panel so a stale browser cache
 // is immediately visible (Android Chrome heuristically caches this page).
-const UI_VERSION = 'v30';
+const UI_VERSION = 'v31';
 function lsGet(k) { try { return localStorage.getItem(k); } catch(_) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch(_) {} }
 
@@ -440,7 +440,7 @@ const CLIENT_ID = QC.id;
   fetch('webcfg.json', { cache: 'no-store' })
     .then(r => r.json())
     .then(c => {
-      if (c && c.debug === true) { const d = $('dbg'); if (d) d.style.display = ''; }
+      if (c && c.debug === true) { const d = $('dbg'); if (d) d.style.display = 'block'; }
       if (c && c.autoplay === true) armAutoplay();
     })
     .catch(() => {});
@@ -472,6 +472,8 @@ document.addEventListener('touchend', e => {
 let _dbgChunks = 0, _dbgLast = '';
 function dbg(msg, cls) {
   cls = cls || 'i';
+  // Mirror to the console so it's reachable via DevTools without the on-screen panel.
+  console.log('[capullo] ' + msg);
   const body = document.getElementById('dbg-body');
   const ts = new Date().toISOString().slice(11, 23);
   const line = document.createElement('div');
@@ -511,6 +513,15 @@ const S={
   locked:false,       // broadcaster locked the stream → this client may edit only its OWN card
 };
 
+// iOS suspends a bare AudioContext once the tab is backgrounded (lock screen /
+// minimize / app switch) → the stream goes silent. The fix is to make the audio
+// come through a real <audio> media element, which iOS keeps alive in the
+// background. Only on iOS: elsewhere ctx.destination stays alive backgrounded and
+// is lower-latency, and an extra media-element buffer would risk multi-device drift.
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.platform) ||
+  /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 // ── Snapcast Binary Audio ─────────────────────────────────────────────────────
 // Faithful port of snapweb's snapstream.ts (proven sync logic). Invariants:
 //  - one clock for sync AND scheduling: getOutputTimestamp/currentTime
@@ -521,7 +532,31 @@ class SnapAudio {
   constructor(ctx) {
     this.ctx = ctx;
     this.gain = ctx.createGain();
-    this.gain.connect(ctx.destination);
+    if (IS_IOS) {
+      // Route the graph into a MediaStream and play it through a real <audio>
+      // element so iOS treats it as a first-class media session (survives lock/
+      // background). The element carries the stream instead of ctx.destination.
+      this.streamDest = ctx.createMediaStreamDestination();
+      this.gain.connect(this.streamDest);
+      this.mediaEl = document.createElement('audio');
+      this.mediaEl.setAttribute('playsinline', '');
+      this.mediaEl.setAttribute('webkit-playsinline', '');
+      this.mediaEl.srcObject = this.streamDest.stream;
+      document.body.appendChild(this.mediaEl);
+      // iOS pauses the element out-of-band (AirPod unplug, phone call) sometimes without
+      // firing a 'pause' event on a MediaStream element - so poll .paused and reflect it
+      // into local state, keeping the lockscreen control correct so one play press recovers.
+      let _lastPaused = false;
+      this._watch = setInterval(() => {
+        const paused = this.mediaEl.paused;
+        if (paused === _lastPaused) return;
+        _lastPaused = paused;
+        if (streamLocked()) { S.localPaused = paused; syncMediaSession(); }
+      }, 400);
+    } else {
+      this.gain.connect(ctx.destination);
+      this.mediaEl = null;
+    }
     this.ws = null;
     this.msgId = 1;
     this.sampleRate = 44100;
@@ -886,6 +921,10 @@ function startLocalAudio() {
   silenceEl.src = makeSilenceUrl();
   document.body.appendChild(silenceEl);
   snapAudio = new SnapAudio(ctx);
+  // iOS: start the stream's media element in the same gesture (autoplay policy).
+  if (snapAudio.mediaEl) {
+    Promise.resolve(snapAudio.mediaEl.play()).catch(e => dbg('mediaEl play failed: ' + e, 'e'));
+  }
   // Optimistic: light the plug immediately. Without this the button only turned
   // green once the server's SETTINGS msg arrived (several round-trips later), so
   // during the connect window it looked dead - a second press (snapAudio already
@@ -898,11 +937,21 @@ function startLocalAudio() {
 function stopLocalAudio() {
   if (!snapAudio) return;
   S.localPaused = false;
-  snapAudio.stop(); snapAudio = null; updateAudioBtn(false);
+  snapAudio.stop();
+  if (snapAudio._watch) clearInterval(snapAudio._watch);
+  if (snapAudio.mediaEl) { snapAudio.mediaEl.pause(); snapAudio.mediaEl.srcObject = null; snapAudio.mediaEl.remove(); }
+  snapAudio = null; updateAudioBtn(false);
   if (silenceEl) { silenceEl.pause(); silenceEl.removeAttribute('src'); silenceEl = null; }
   syncMediaSession();
 }
 $('audio-btn').onclick = () => { if (snapAudio) stopLocalAudio(); else startLocalAudio(); };
+
+// The broadcaster has locked the stream when we have no server transport rights -
+// then the lockscreen play/pause drives LOCAL listening instead of the server.
+function streamLocked() {
+  const p = S.pb;
+  return !(p.canPlay || p.canPause || p.canPrev || p.canNext);
+}
 
 // Local pause/resume used by the lockscreen when the SERVER stream is locked.
 // Both the AudioContext AND the silence <audio> must flip together: if the
@@ -911,15 +960,29 @@ $('audio-btn').onclick = () => { if (snapAudio) stopLocalAudio(); else startLoca
 function localPause() {
   if (!snapAudio) return;
   S.localPaused = true;
-  if (snapAudio.ctx) snapAudio.ctx.suspend().catch(() => {});
-  if (silenceEl) silenceEl.pause();
+  if (snapAudio.mediaEl) {
+    // iOS: mute by pausing the media element only - keep the AudioContext running so the
+    // stream stays synced and resume is instant (suspending it stalls playback → plug toggle).
+    snapAudio.mediaEl.pause();
+  } else {
+    if (snapAudio.ctx) snapAudio.ctx.suspend().catch(() => {});
+    if (silenceEl) silenceEl.pause();
+  }
   syncMediaSession();
 }
 function localResume() {
   if (!snapAudio) return;
   S.localPaused = false;
-  if (snapAudio.ctx) snapAudio.ctx.resume().catch(() => {});
-  if (silenceEl) Promise.resolve(silenceEl.play()).catch(() => {});
+  if (snapAudio.ctx && snapAudio.ctx.state === 'suspended') snapAudio.ctx.resume().catch(() => {});
+  if (snapAudio.mediaEl) {
+    Promise.resolve(snapAudio.mediaEl.play()).catch(e => dbg('resume play fail: ' + e, 'e'));
+  } else if (silenceEl) {
+    Promise.resolve(silenceEl.play()).catch(() => {});
+  }
+  // If the stream socket died while paused (long background / lock), revive it so one
+  // play press fully recovers instead of needing the plug toggle (stop→start).
+  const ws = snapAudio.ws;
+  if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) snapAudio._connect();
   syncMediaSession();
 }
 
@@ -1568,6 +1631,7 @@ document.addEventListener('visibilitychange', () => {
   if (snapAudio && snapAudio.running) {
     // Don't override a deliberate lockscreen pause (stream-locked local mode)
     if (snapAudio.ctx.state === 'suspended' && !S.localPaused) snapAudio.ctx.resume();
+    if (snapAudio.mediaEl && !S.localPaused) Promise.resolve(snapAudio.mediaEl.play()).catch(() => {});
     const ws = snapAudio.ws;
     if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
       dbg('visible again → reconnecting audio', 'i');
@@ -2024,7 +2088,6 @@ function setStatus(c) { const el = $('status'); el.className = c; el.innerHTML =
 $('bprev').innerHTML = ICO_PREV;
 $('bnext').innerHTML = ICO_NEXT;
 $('bplay').innerHTML = ICO_PLAY;
-$('dbg-ver').textContent = UI_VERSION;
 dbg('webui ' + UI_VERSION, 'ok');
 connect();
 </script>
