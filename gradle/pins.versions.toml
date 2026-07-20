@@ -10,7 +10,7 @@ contracts = "main-SNAPSHOT"
 libSnapcast = "7e7c272"
 # lib-media3-ffmpeg-android via jitpack - prebuilt media3 decoder_ffmpeg AAR, pinned by
 # commit (rebuilt/re-tagged only when media3 bumps; see that repo's BUILD_FFMPEG.md).
-libMedia3Ffmpeg = "a5c153ac0d0d9fedc9391508a318b4830c01c8c5"
+libMedia3Ffmpeg = "046f2fcbd66d067242dd9df51612b1a7b4ccbd86"
 
 [libraries]
 # The integrator SPI. jitpack coordinate; composite build substitutes it locally.
