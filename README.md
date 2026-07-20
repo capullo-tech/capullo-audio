@@ -1,10 +1,12 @@
 # capullo-audio
 
-The **delivery engine** (Layer 2) of the [Capullo Audio Platform](https://github.com/capullo-tech).
+The **delivery engine** of the [Capullo Audio Platform](https://github.com/capullo-tech).
 An Android library that decodes whatever a source resolves through ExoPlayer, tees the PCM into a
 Snapcast FIFO, and broadcasts time-synced audio on the LAN with a bundled web player.
 
 Namespace `tech.capullo.audio` · Gradle 9.6.1 · Kotlin 2.3.10 · AGP 9.1.0 · Media3 1.9.0.
+
+Where this sits: see [Platform shape](https://github.com/capullo-tech/capullo-audio-contracts#platform-shape).
 
 ## What's in here
 
@@ -17,9 +19,10 @@ Namespace `tech.capullo.audio` · Gradle 9.6.1 · Kotlin 2.3.10 · AGP 9.1.0 · 
 
 ## Dependencies (dependency direction is one-way)
 
-- `api` → `capullo-audio-contracts` (Layer 1 SPI). The engine speaks only `MediaSourceProvider` /
-  `NowPlaying` / `PlaybackController` - it knows nothing about radio or Telegram.
-- `implementation` → `lib-snapcast-android` (Layer 0 native `.so`), Media3.
+- `api` → `capullo-audio-contracts` (the SPI). The engine speaks only `MediaSourceProvider` /
+  `NowPlaying` / `PlaybackController` - it knows nothing about radio or Telegram, and never depends
+  on a `capullo-source-*` library: sources are siblings, not a layer underneath.
+- `implementation` → `lib-snapcast-android` (prebuilt native `.so`), Media3.
 - The FFmpeg decoder (`lib-media3-ffmpeg-android`) is **reflection-loaded** by
   `DefaultRenderersFactory` when present on the app classpath - not a compile dependency here.
 

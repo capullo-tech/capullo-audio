@@ -44,7 +44,7 @@ android {
 }
 
 dependencies {
-    // Layer 1 SPI (the only thing apps also see through this engine's api surface).
+    // The SPI (the only thing apps also see through this engine's api surface).
     api(pins.capullo.audio.contracts)
 
     // Media3 delivery pipeline. exoplayer + common are `api`: the public surface exposes their types
@@ -55,7 +55,7 @@ dependencies {
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.datasource)
 
-    // FFmpeg software audio decoders (Layer 0) for codec parity with QuantumCast - mp3/aac/vorbis/
+    // FFmpeg software audio decoders (prebuilt native AAR) for codec parity with QuantumCast - mp3/aac/vorbis/
     // opus/flac fallback when the device MediaCodec lacks a codec (FifoRenderersFactory sets
     // EXTENSION_RENDERER_MODE_ON). Runtime-only: DefaultRenderersFactory loads FfmpegAudioRenderer
     // reflectively off the classpath - never referenced at compile time. `implementation` on this
