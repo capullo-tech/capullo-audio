@@ -1,21 +1,21 @@
 # capullo-audio LOCAL pins catalog (`pins.*`) - things that must NOT come from the shared
-# build-conventions catalog: the inter-repo capullo/L0 coordinates, pinned independently per
+# build-conventions catalog: the inter-repo capullo coordinates, pinned independently per
 # release. Everything else (toolchain + Media3/ktor/coroutines/
 # Compose/test) comes from the shared `libs` catalog.
 [versions]
-# Contracts (Layer 1): jitpack coordinate for published builds; the settings.gradle.kts composite
+# Contracts: jitpack coordinate for published builds; the settings.gradle.kts composite
 # build substitutes the sibling project when it's checked out next to this repo.
 contracts = "main-SNAPSHOT"
-# lib-snapcast-android (Layer 0) via jitpack - same coordinate the apps use, no token.
+# lib-snapcast-android via jitpack - same coordinate the apps use, no token.
 libSnapcast = "7e7c272"
-# lib-media3-ffmpeg-android (Layer 0) via jitpack - prebuilt media3 decoder_ffmpeg AAR, pinned by
+# lib-media3-ffmpeg-android via jitpack - prebuilt media3 decoder_ffmpeg AAR, pinned by
 # commit (rebuilt/re-tagged only when media3 bumps; see that repo's BUILD_FFMPEG.md).
-libMedia3Ffmpeg = "31dcef4545"
+libMedia3Ffmpeg = "a5c153ac0d0d9fedc9391508a318b4830c01c8c5"
 
 [libraries]
-# The integrator SPI (Layer 1). jitpack coordinate; composite build substitutes it locally.
+# The integrator SPI. jitpack coordinate; composite build substitutes it locally.
 capullo-audio-contracts = { module = "com.github.capullo-tech:capullo-audio-contracts", version.ref = "contracts" }
-# Snapcast native binaries (Layer 0) - jitpack multi-module coordinate (group = com.github.<org>.<repo>).
+# Snapcast native binaries - jitpack multi-module coordinate (group = com.github.<org>.<repo>).
 lib-snapcast-android = { module = "com.github.capullo-tech.lib-snapcast-android:lib-snapcast-android", version.ref = "libSnapcast" }
-# FFmpeg decoder AAR (Layer 0) - jitpack single-artifact coordinate (group = com.github.<org>).
+# FFmpeg decoder AAR - jitpack single-artifact coordinate (group = com.github.<org>).
 lib-media3-ffmpeg-android = { module = "com.github.capullo-tech:lib-media3-ffmpeg-android", version.ref = "libMedia3Ffmpeg" }
