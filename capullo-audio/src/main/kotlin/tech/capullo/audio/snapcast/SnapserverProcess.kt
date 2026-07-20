@@ -62,7 +62,13 @@ class SnapserverProcess(
         private const val CODEC = "codec=pcm"
         private const val PIPE_MODE = "mode=read"
         private const val DRYOUT_MS = "dryout_ms=10000"
-        private const val SAMPLE_FORMAT = "sampleformat=44100:16:2"
+        // LOCKSTEP: this rate is how snapserver INTERPRETS the raw PCM the app writes to the FIFO,
+        // so it must equal the app resampler's output rate (TC PlaybackService, QC FifoAudioSink's
+        // FifoRenderersFactory) and the silence-buffer sizing below - mismatch = wrong pitch/garbage.
+        // 48000 (was 44100) so 48kHz-native sources (hi-res FLAC, Opus) flow through WITHOUT the
+        // 48->44.1 downsample that drove the snapserver into a resync storm (audible stutter); 44.1k
+        // sources now take one clean 44.1->48 upsample instead of a 44.1->48 round-trip.
+        private const val SAMPLE_FORMAT = "sampleformat=48000:16:2"
         private val TAG = SnapserverProcess::class.java.simpleName
     }
 

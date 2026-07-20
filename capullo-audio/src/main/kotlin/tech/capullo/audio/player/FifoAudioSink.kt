@@ -18,7 +18,7 @@ import java.nio.ByteBuffer
 
 /**
  * Receives the decoded PCM from the TeeAudioProcessor (already forced to
- * 44100 Hz / 16-bit / stereo by the processor chain in [FifoRenderersFactory])
+ * 48000 Hz / 16-bit / stereo by the processor chain in [FifoRenderersFactory])
  * and writes it into the snapserver FIFO.
  *
  * The FIFO is opened O_RDWR, like VLC's sout file module did: O_RDWR on a
@@ -79,8 +79,8 @@ class FifoAudioBufferSink(
     @Volatile private var lastRealWriteNs = 0L
     @Volatile private var priming = false
     private var silenceThread: Thread? = null
-    // 40ms of the guaranteed 44100Hz/16-bit/stereo format = 1764 frames * 4 bytes.
-    private val silence = ByteArray(44100 * SILENCE_CHUNK_MS / 1000 * 2 * 2)
+    // 40ms of the guaranteed 48000Hz/16-bit/stereo format (LOCKSTEP with SnapserverProcess) = 1920 frames * 4 bytes.
+    private val silence = ByteArray(48000 * SILENCE_CHUNK_MS / 1000 * 2 * 2)
 
     fun enableWrites() {
         writeEnabled = true
@@ -145,7 +145,7 @@ class FifoAudioBufferSink(
     }
 
     override fun flush(sampleRateHz: Int, channelCount: Int, encoding: Int) {
-        // Called on (re)configure - the chain guarantees 44100/2ch/16-bit here.
+        // Called on (re)configure - the chain guarantees 48000/2ch/16-bit here.
         Log.d(TAG, "FIFO sink format: ${sampleRateHz}Hz ${channelCount}ch enc=$encoding")
         open()
     }
@@ -178,7 +178,7 @@ class FifoAudioBufferSink(
 
 /**
  * DefaultRenderersFactory whose audio sink chain is:
- *   [ChannelMixing → 2ch] → [Sonic resample → 44100] → [Tee → FIFO] → AudioTrack
+ *   [ChannelMixing → 2ch] → [Sonic resample → 48000] → [Tee → FIFO] → AudioTrack
  *
  * The AudioTrack output stays (it paces playback and provides the position
  * clock) but PlaybackService sets player volume to 0 - local audio comes from
@@ -212,7 +212,8 @@ class FifoRenderersFactory(
             putChannelMixingMatrix(ChannelMixingMatrix.create(1, 2))
             putChannelMixingMatrix(ChannelMixingMatrix.create(2, 2))
         }
-        val resampler = SonicAudioProcessor().apply { setOutputSampleRateHz(44100) }
+        // LOCKSTEP with SnapserverProcess.SAMPLE_FORMAT (48000) - the FIFO is read at that rate.
+        val resampler = SonicAudioProcessor().apply { setOutputSampleRateHz(48000) }
         return DefaultAudioSink.Builder(context)
             .setEnableFloatOutput(false)  // keep the chain in 16-bit PCM
             .setAudioProcessorChain(
