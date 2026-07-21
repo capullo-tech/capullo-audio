@@ -562,6 +562,7 @@ class SnapAudio {
     this.sampleRate = 44100;
     this.bufMs = 1000;       // serverBufferMs - clientLatencySetting (snapweb folds latency in)
     this.ctxLat = 0;         // ctx.baseLatency + ctx.outputLatency, in seconds
+    this._latBuf = [];       // recent outputLatency samples for the ctxLat median
     this.bufFrames = Math.floor(0.08 * this.sampleRate);  // 80ms like snapweb
     this.diff = 0;
     this._diffBuf = [];
@@ -583,6 +584,22 @@ class SnapAudio {
     return t * 1000;
   }
   _serverNow() { return this._now() + this.diff; }
+
+  // On Bluetooth, ctx.outputLatency climbs from ~10ms at stream start to its real steady value
+  // (~250ms) and keeps drifting, so it must be re-read while playing - a one-shot read at CODEC
+  // time freezes a uselessly early value. Individual reads jitter by ~±25ms, which is over the
+  // 5ms hard-sync threshold in _fill, so raw application would seek every poll - median it.
+  _updateCtxLat() {
+    const lat = (this.ctx.baseLatency || 0) + (this.ctx.outputLatency || 0);
+    this._latBuf.push(lat);
+    if (this._latBuf.length > 10) this._latBuf.shift();
+    const sorted = [...this._latBuf].sort((a, b) => a - b);
+    const med = sorted[Math.floor(sorted.length / 2)];
+    if (Math.abs(med - this.ctxLat) > 0.005)
+      dbg('ctxLat '+(this.ctxLat*1000).toFixed(1)+'→'+(med*1000).toFixed(1)+'ms (out='
+          +((this.ctx.outputLatency||0)*1000).toFixed(0)+'ms)','i');
+    this.ctxLat = med;
+  }
 
   start() {
     if (this.running) return;
@@ -621,7 +638,7 @@ class SnapAudio {
       this._diffBuf = []; this.diff = 0;   // snapweb: reset, first TIME reply seeds it
       this._sendHello();
       this._syncTime();
-      this.syncHandle = setInterval(() => this._syncTime(), 1000);
+      this.syncHandle = setInterval(() => { this._syncTime(); this._updateCtxLat(); }, 1000);
     };
     ws.onmessage = ev => { if (ev.data instanceof ArrayBuffer) this._onMsg(ev.data); };
     ws.onclose = e => {
@@ -720,7 +737,8 @@ class SnapAudio {
         this._free = [];  // discard pooled buffers built for an old sample rate
         if (this.ctx.sampleRate !== this.sampleRate)
           dbg('WARN ctx sr='+this.ctx.sampleRate+' != stream sr='+this.sampleRate,'e');
-        this.ctxLat = (this.ctx.baseLatency || 0) + (this.ctx.outputLatency || 0);
+        this._latBuf = [];   // new stream, possibly new route - drop stale latency samples
+        this._updateCtxLat();
         dbg('CODEC pcm '+rate+':'+bits+':'+channels+' ctxLat='+(this.ctxLat*1000).toFixed(1)+'ms','ok');
         // snapweb starts the playback chain right after CODEC (not on first chunk)
         if (!this.playing) this._startPlayback();

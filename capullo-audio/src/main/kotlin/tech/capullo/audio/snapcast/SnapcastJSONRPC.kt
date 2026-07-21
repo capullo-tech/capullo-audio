@@ -235,9 +235,36 @@ abstract class RequestResponse : SnapcastJSONRPCResponse() {
     abstract override val jsonrpc: String
 }
 
+/** Success response whose result shape isn't modeled (Client.SetLatency → `{"latency": N}`,
+ *  Stream.Control → `"ok"`, ...). Carries the raw result; correlate with the request via [id]. */
+@Serializable
+data class GenericSuccessResponse(
+    override val id: Int,
+    override val jsonrpc: String,
+    val result: JsonElement,
+) : RequestResponse()
+
+/** JSON-RPC error response. [id] is null when the server couldn't attribute the request. */
+@Serializable
+data class SnapcastErrorResponse(
+    val id: Int? = null,
+    override val jsonrpc: String,
+    val error: JsonRpcError,
+) : SnapcastJSONRPCResponse()
+
+@Serializable
+data class JsonRpcError(val code: Int, val message: String, val data: JsonElement? = null)
+
 object RequestResponseSerializer : JsonContentPolymorphicSerializer<RequestResponse>(RequestResponse::class) {
+    // Only Server.GetStatus carries a `server` object in its result; every other success reply
+    // (SetLatency, SetVolume, Stream.Control "ok", ...) keeps its raw result in a generic envelope
+    // instead of failing to decode as a GetStatus response.
     override fun selectDeserializer(element: JsonElement): DeserializationStrategy<RequestResponse> =
-        ServerGetStatusResponse.serializer()
+        if ((element.jsonObject["result"] as? JsonObject)?.containsKey("server") == true) {
+            ServerGetStatusResponse.serializer()
+        } else {
+            GenericSuccessResponse.serializer()
+        }
 }
 
 @Serializable
@@ -246,6 +273,12 @@ abstract class SnapcastJSONRPCResponse {
 }
 
 object SnapcastJSONRPCResponseSerializer : JsonContentPolymorphicSerializer<SnapcastJSONRPCResponse>(SnapcastJSONRPCResponse::class) {
-    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<SnapcastJSONRPCResponse> =
-        if ("method" in element.jsonObject) NotificationSerializer else RequestResponseSerializer
+    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<SnapcastJSONRPCResponse> {
+        val obj = element.jsonObject
+        return when {
+            "method" in obj -> NotificationSerializer
+            "error" in obj -> SnapcastErrorResponse.serializer()
+            else -> RequestResponseSerializer
+        }
+    }
 }

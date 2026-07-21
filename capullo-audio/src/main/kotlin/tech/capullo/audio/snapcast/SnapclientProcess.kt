@@ -11,7 +11,10 @@ import androidx.core.content.edit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.io.BufferedReader
@@ -33,6 +36,15 @@ class SnapclientProcess(private val context: Context) {
 
     private val _connectionState = MutableStateFlow(ConnectionState.STARTING)
     val connectionState = _connectionState.asStateFlow()
+
+    // Buffered so slow collectors never stall the stdout reader; samples arrive ~1/s.
+    private val _stats = MutableSharedFlow<SnapclientStats>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** Per-second sync stats parsed from the running client's stdout; see [SnapclientStats]. */
+    val stats = _stats.asSharedFlow()
 
     val storedHostId: String
         get() = localHostId(context)
@@ -96,6 +108,7 @@ class SnapclientProcess(private val context: Context) {
                     when {
                         it.contains("[Error] (Connection)") -> _connectionState.update { ConnectionState.ERROR }
                         it.contains("[Notice] (Connection) Connected to") -> _connectionState.update { ConnectionState.CONNECTED }
+                        else -> SnapclientStats.parse(it)?.let(_stats::tryEmit)
                     }
                     Log.d(TAG, it)
                 }

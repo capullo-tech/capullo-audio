@@ -140,13 +140,17 @@ class SnapcastControlClient(
         )
     }
 
-    suspend fun sendSetLatency(clientId: String, latencyMs: Int) {
-        session?.sendSerialized(
+    /** Returns the JSON-RPC request id (its [GenericSuccessResponse]/[SnapcastErrorResponse] ack
+     *  arrives on [notifications]), or null when there is no session — i.e. nothing was sent. */
+    suspend fun sendSetLatency(clientId: String, latencyMs: Int): Int? = session?.let { s ->
+        val requestId = requestIdCounter++
+        s.sendSerialized(
             ClientSetLatencyRequest(
-                id = requestIdCounter++,
+                id = requestId,
                 params = LatencyParams(clientId, latencyMs),
             )
         )
+        requestId
     }
 
     suspend fun sendStreamControl(streamId: String, command: String) {
