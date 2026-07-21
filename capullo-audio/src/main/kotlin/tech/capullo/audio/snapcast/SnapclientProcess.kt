@@ -108,7 +108,18 @@ class SnapclientProcess(private val context: Context) {
                     when {
                         it.contains("[Error] (Connection)") -> _connectionState.update { ConnectionState.ERROR }
                         it.contains("[Notice] (Connection) Connected to") -> _connectionState.update { ConnectionState.CONNECTED }
-                        else -> SnapclientStats.parse(it)?.let(_stats::tryEmit)
+                        else -> SnapclientStats.parse(it)?.also { s ->
+                            _stats.tryEmit(s)
+                            // Labeled per-second sync diagnostic (raw line is Log.d below). reportedDac
+                            // is Stats col 6 = player-reported output latency; on A2DP the BT estimate.
+                            Log.i(
+                                TAG,
+                                "Stats sync med=${s.medianErrorMs}ms " +
+                                    "(mini=${s.miniMedianErrorMs} short=${s.shortMedianErrorMs}) " +
+                                    "reportedDac=${s.reportedOutputLatencyMs}ms " +
+                                    "fill=${s.statsWindowFill} frameDelta=${s.frameDelta}",
+                            )
+                        }
                     }
                     Log.d(TAG, it)
                 }
