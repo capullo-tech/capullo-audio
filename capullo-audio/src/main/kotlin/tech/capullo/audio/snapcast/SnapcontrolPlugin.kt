@@ -175,19 +175,42 @@ private class SnapcontrolSession(
     fun notifyProperties() {
         scope.launch {
             propsMutex.withLock {
-                val notif = JSONObject()
-                    .put("jsonrpc", "2.0")
-                    .put("method", "Plugin.Stream.Player.Properties")
-                    .put("params", buildProperties())
-                outbox.trySend(notif.toString())
+                outbox.trySend(
+                    """{"jsonrpc":"2.0","method":"Plugin.Stream.Player.Properties","params":${propertiesString()}}""",
+                )
             }
         }
     }
 
-    private fun buildProperties(): JSONObject {
+    // Metadata serialization cache. notifyProperties() fires on every transport flip and
+    // handleLine() answers every snapserver GetProperties poll - both re-emit the full properties,
+    // whose `metadata` block embeds the album art as a ~300KB Base64 blob. org.json escapes that
+    // blob char-by-char on each toString(); doing it per call pegs a core and starves the real-time
+    // FIFO writer (→ underruns → resync storm → stutter). The art only changes per track, so we
+    // serialize the metadata block once and reuse the string until an art-affecting field moves.
+    private val metaCacheLock = Any()
+    private var metaCachePrimed = false
+    private var cachedMetaFields: String? = null
+    private var cachedMetaJson: String? = null
+
+    private fun metadataJson(np: NowPlaying): String? = synchronized(metaCacheLock) {
+        // Identity of everything mapper.metadata() reads. The art is hashed (length + hashCode)
+        // rather than compared by value; String caches its hashCode, so once the producer hands a
+        // stable per-track instance this is O(1). A changed blob just reserializes once.
+        val artKey = np.artworkBase64?.let { "${it.length}:${it.hashCode()}" }
+        val fields = "${np.title} ${np.artist} ${np.album} ${np.streamUrl} " +
+            "${np.extras} $artKey"
+        if (!metaCachePrimed || fields != cachedMetaFields) {
+            cachedMetaFields = fields
+            cachedMetaJson = mapper.metadata(np)?.toString()
+            metaCachePrimed = true
+        }
+        cachedMetaJson
+    }
+
+    private fun propertiesString(): String {
         val np = state.value
         val locked = getLocked()
-        val active = np.isPlaying // paused is folded into non-playing for transport gating
         val obj = JSONObject()
             .put("playbackStatus", mapper.playbackStatus(np))
             .put("loopStatus", "none")
@@ -200,8 +223,12 @@ private class SnapcontrolSession(
             .put("canGoNext", !locked && np.canGoNext)
             .put("canGoPrevious", !locked && np.canGoPrevious)
             .put("canControl", true)
-        mapper.metadata(np)?.let { obj.put("metadata", it) }
-        return obj
+        val base = obj.toString()
+        val meta = metadataJson(np) ?: return base
+        // Splice the pre-serialized metadata fragment in verbatim rather than putting the JSONObject
+        // on `obj`: a top-level toString() would re-escape the whole art blob. `base` is a non-empty
+        // object, so it ends in '}'.
+        return base.substring(0, base.length - 1) + ",\"metadata\":" + meta + "}"
     }
 
     private suspend fun readerLoop() {
@@ -238,7 +265,12 @@ private class SnapcontrolSession(
 
         try {
             val result: Any = when (method) {
-                "Plugin.Stream.Player.GetProperties" -> buildProperties()
+                "Plugin.Stream.Player.GetProperties" -> {
+                    // Splice the pre-serialized properties in verbatim; routing the JSONObject
+                    // through sendResult() would re-escape the ~300KB art blob on every poll.
+                    if (id != null) sendRawResult(id, propertiesString())
+                    return
+                }
                 "Plugin.Stream.Player.Control" -> {
                     val command = req.optJSONObject("params")?.optString("command") ?: ""
                     if (getLocked()) {
@@ -267,6 +299,14 @@ private class SnapcontrolSession(
 
     private fun sendResult(id: Any, result: Any) {
         outbox.trySend(JSONObject().put("jsonrpc", "2.0").put("id", id).put("result", result).toString())
+    }
+
+    // Sends a result whose value is already-serialized JSON, spliced in verbatim so a large art
+    // blob inside it is not re-escaped. The head object is tiny, so its toString() is cheap; it is
+    // always non-empty and ends in '}'.
+    private fun sendRawResult(id: Any, rawResult: String) {
+        val head = JSONObject().put("jsonrpc", "2.0").put("id", id).toString()
+        outbox.trySend(head.substring(0, head.length - 1) + ",\"result\":" + rawResult + "}")
     }
 
     private fun sendError(id: Any, code: Int, message: String) {
