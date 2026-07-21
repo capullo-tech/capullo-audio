@@ -48,8 +48,22 @@ class AudioFocusController(
     /** True while the local snapclient is stopped *because* focus was lost (not a user stop). */
     private var pausedByFocusLoss = false
 
+    /** While true, focus LOSSES are ignored entirely (no state transition, no onPause).
+     *  Used during mic sync calibration: some OEMs (ColorOS) signal a focus loss when the
+     *  app's own recorder opens, which would silence the reference speaker mid-measurement.
+     *  Losses are only suppressed for the seconds a calibration runs, started deliberately
+     *  by the user, so missing a genuine transient loss (a call) is an accepted trade. */
+    @Volatile
+    var suppressLosses: Boolean = false
+
     private val listener = AudioManager.OnAudioFocusChangeListener { change ->
-        Log.d(TAG, "onAudioFocusChange: $change (hasFocus=$hasFocus)")
+        Log.d(TAG, "onAudioFocusChange: $change (hasFocus=$hasFocus, suppressLosses=$suppressLosses)")
+        if (suppressLosses &&
+            (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+        ) {
+            Log.d(TAG, "focus loss ignored (calibration in progress)")
+            return@OnAudioFocusChangeListener
+        }
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS -> {
                 // Permanent loss: another app took over and Android won't redistribute focus back.

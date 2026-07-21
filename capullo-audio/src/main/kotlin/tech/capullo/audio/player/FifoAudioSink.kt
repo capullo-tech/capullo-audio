@@ -62,6 +62,11 @@ class FifoAudioBufferSink(
     // stale buffers into the next session's fresh pipe.
     @Volatile private var closed = false
 
+    // Armed by SyncCalibrator for the duration of a calibration run: mirrors everything
+    // that enters the FIFO (real PCM and keep-alive silence, so the ring's timeline stays
+    // gap-free) into a reference ring for mic cross-correlation.
+    @Volatile var pcmTap: tech.capullo.audio.calibration.ReferencePcmRing? = null
+
     // --- Silence keep-alive (stream priming) ---
     // The snapserver's AsioStream marks the pipe source "idle" after ~120ms with no data. Feeding the
     // FIFO only from handleBuffer (real PCM) starves it during any gap - startup buffering, between
@@ -100,6 +105,7 @@ class FifoAudioBufferSink(
                             if (writeEnabled && !closed && gapExceeded()) {
                                 out?.channel?.let { ch ->
                                     buf.rewind()
+                                    pcmTap?.write(buf)
                                     while (buf.hasRemaining()) ch.write(buf)
                                 }
                             }
@@ -157,6 +163,7 @@ class FifoAudioBufferSink(
             val o = out ?: return
             lastRealWriteNs = System.nanoTime() // marks real audio flowing → keep-alive backs off
             try {
+                pcmTap?.write(buffer)
                 val ch = o.channel
                 while (buffer.hasRemaining()) ch.write(buffer)
             } catch (e: Exception) {

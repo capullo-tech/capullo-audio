@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.SettingsBackupRestore
 import androidx.compose.material.icons.filled.VolumeDown
@@ -71,6 +72,12 @@ fun SnapcastControlSheet(
     // clears its persisted spatial role); long press resets EVERY connected client.
     onResetSelf: () -> Unit = {},
     onResetAll: () -> Unit = {},
+    // Broadcaster-only mic sync calibration (null hides the button). Runs on the server
+    // device: records the room, cross-correlates against the broadcast PCM, trims each
+    // client's latency automatically.
+    onCalibrateSync: (() -> Unit)? = null,
+    calibrationRunning: Boolean = false,
+    calibrationStatus: String = "",
     httpPort: Int = 1680,
     onDismiss: () -> Unit,
 ) {
@@ -125,20 +132,39 @@ fun SnapcastControlSheet(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (isBroadcaster) {
-                // Short press = reset this device; long press = reset all clients. An IconButton
-                // can't distinguish long-press, so use a combinedClickable Box sized like one.
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .combinedClickable(onClick = onResetSelf, onLongClick = onResetAll),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.SettingsBackupRestore,
-                        contentDescription = "Reset this device (long-press: reset all)",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Short press = reset this device; long press = reset all clients. An IconButton
+                    // can't distinguish long-press, so use a combinedClickable Box sized like one.
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .combinedClickable(onClick = onResetSelf, onLongClick = onResetAll),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SettingsBackupRestore,
+                            contentDescription = "Reset this device (long-press: reset all)",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    onCalibrateSync?.let { start ->
+                        IconButton(
+                            onClick = start,
+                            enabled = !calibrationRunning,
+                            modifier = Modifier.size(40.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "Calibrate speaker sync with the microphone",
+                                tint = if (calibrationRunning) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
+                    }
                 }
             } else {
                 // Keep SpaceBetween pushing the QR/lock group to the right edge.
@@ -162,6 +188,19 @@ fun SnapcastControlSheet(
                     }
                 }
             }
+        }
+
+        // One-line calibration progress/result, only while there is something to say.
+        if (calibrationStatus.isNotEmpty()) {
+            Text(
+                text = calibrationStatus,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 2.dp),
+            )
         }
 
         // Group volume slider
