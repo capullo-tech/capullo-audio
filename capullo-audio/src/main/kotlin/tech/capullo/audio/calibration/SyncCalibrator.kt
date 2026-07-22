@@ -43,6 +43,9 @@ class SyncCalibrator(
      *  live status, so every commit/restore write can be confirmed and retried. Null skips
      *  read-back (a silent SetLatency failure then goes uncaught — host should supply it). */
     private val readLatencies: (suspend () -> Map<String, Int>)? = null,
+    /** Records pre-run latencies so a process death mid-run can be undone on restart (see
+     *  [CalibrationJournal] and [recover]). Null disables crash recovery. */
+    private val journal: CalibrationJournal? = null,
 ) {
 
     data class CalClient(
@@ -75,6 +78,10 @@ class SyncCalibrator(
         }
         val ring = ReferencePcmRing()
         tapArm(ring)
+        // Record every client's pre-run latency BEFORE the first mutating write, so a
+        // process death mid-run is undone on the next start (see [recover]). Cleared in
+        // the finally once the run has restored/committed on its own.
+        journal?.save(clients.associate { it.id to it.latencyMs })
         try {
             // Let the ring cover more than one full capture before the first measurement.
             progress("priming reference ring (${RING_PRIME_MS / 1000}s)…")
@@ -86,6 +93,7 @@ class SyncCalibrator(
             }
         } finally {
             tapArm(null)
+            journal?.clear()
             if (_state.value is State.Running) _state.value = State.Failed("aborted")
         }
     }
@@ -552,6 +560,24 @@ class SyncCalibrator(
 
     companion object {
         private const val TAG = "SyncCalibrator"
+
+        /**
+         * Undo a calibration run that a process death interrupted. If [journal] still holds
+         * originals, the previous run never reached its finally, so restore each client's
+         * pre-run latency via [setLatency] and clear the journal. Call once at host startup
+         * (after the server control connection is up) BEFORE any new run. Safe to call when
+         * no journal exists (returns empty). Returns the restored client ids.
+         */
+        suspend fun recover(
+            journal: CalibrationJournal,
+            setLatency: suspend (clientId: String, latencyMs: Int) -> Unit,
+        ): List<String> {
+            val pending = journal.load() ?: return emptyList()
+            Log.w(TAG, "recovering ${pending.size} client latency(ies) from an interrupted run: ${pending.keys}")
+            pending.forEach { (id, latency) -> setLatency(id, latency) }
+            journal.clear()
+            return pending.keys.toList()
+        }
 
         /** Classify a correction before trusting it (pure; unit-tested). Order matters: a
          *  within-deadband delta is "already aligned" regardless of stability; only then
