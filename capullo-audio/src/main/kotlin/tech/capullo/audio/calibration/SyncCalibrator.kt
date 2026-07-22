@@ -47,6 +47,8 @@ class SyncCalibrator(
     /** Records pre-run latencies so a process death mid-run can be undone on restart (see
      *  [CalibrationJournal] and [recover]). Null disables crash recovery. */
     private val journal: CalibrationJournal? = null,
+    /** Appends each verified correction for later per-sink analysis. Null disables it. */
+    private val history: CalibrationHistory? = null,
     /** Builds the [Measurer] for a run's ring. Null uses the real mic measurer; tests inject
      *  a factory returning a fake to drive the orchestration deterministically. */
     private val measurerFactory: ((ReferencePcmRing) -> Measurer)? = null,
@@ -251,6 +253,7 @@ class SyncCalibrator(
             return failPair(target, "verify residual ${residualMs}ms > ${PAIR_RESIDUAL_TOL_MS}ms")
         }
         commitLatency(target.id, newLatency) // remove verify probe → aligned
+        history?.record(target.id, deltaMs, newLatency)
         return "${target.name}: ${if (deltaMs == 0) "already aligned" else "trim ${deltaMs}ms"} " +
             "(latency $newLatency, residual ${residualMs}ms, verified)"
     }
@@ -417,6 +420,7 @@ class SyncCalibrator(
                     if (conf.tracked.containsKey(c.idx)) {
                         val newLatency = c.client.latencyMs + c.deltaMs
                         commitLatency(c.client.id, newLatency) // remove verify probe
+                        history?.record(c.client.id, c.deltaMs, newLatency)
                         succeeded += c.client.id
                         outcomes[c.client.id] = "${c.client.name}: trim ${c.deltaMs}ms (latency $newLatency, verified)"
                     } else {
