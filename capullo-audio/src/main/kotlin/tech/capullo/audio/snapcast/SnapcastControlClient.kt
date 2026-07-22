@@ -31,7 +31,7 @@ class SnapcastControlClient(
     private val snapserverHostAddress: String,
     private val websocketPort: Int = 1680,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-) {
+) : tech.capullo.audio.calibration.CalibrationControl {
     // internal, not public: consumers tear down via close() instead of touching the ktor client, so
     // ktor stays an implementation detail of this module (apps don't need ktor on their classpath).
     internal val client = HttpClient(OkHttp) {
@@ -100,11 +100,11 @@ class SnapcastControlClient(
         }
     }
 
-    suspend fun sendGetStatus() {
+    override suspend fun sendGetStatus() {
         session?.sendSerialized(ServerGetStatusRequest(id = requestIdCounter++))
     }
 
-    suspend fun sendSetVolume(clientId: String, muted: Boolean, percent: Int) {
+    override suspend fun sendSetVolume(clientId: String, muted: Boolean, percent: Int) {
         session?.sendSerialized(
             ClientSetVolumeRequest(
                 id = requestIdCounter++,
@@ -142,7 +142,7 @@ class SnapcastControlClient(
 
     /** Returns the JSON-RPC request id (its [GenericSuccessResponse]/[SnapcastErrorResponse] ack
      *  arrives on [notifications]), or null when there is no session — i.e. nothing was sent. */
-    suspend fun sendSetLatency(clientId: String, latencyMs: Int): Int? = session?.let { s ->
+    override suspend fun sendSetLatency(clientId: String, latencyMs: Int): Int? = session?.let { s ->
         val requestId = requestIdCounter++
         s.sendSerialized(
             ClientSetLatencyRequest(

@@ -4,7 +4,6 @@ import android.util.Log
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import tech.capullo.audio.snapcast.SnapcastControlClient
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -37,8 +36,10 @@ class SyncCalibrator(
      *  engine restart mid-run (a new FifoAudioBufferSink must inherit the armed ring),
      *  so the host owns the wiring rather than this class holding a sink reference. */
     private val tapArm: (ReferencePcmRing?) -> Unit,
-    private val mic: MicCapture,
-    private val control: SnapcastControlClient,
+    /** Required in production (feeds the default measurer); null only when a test injects a
+     *  [measurerFactory] that doesn't record a mic. */
+    private val mic: MicCapture? = null,
+    private val control: CalibrationControl,
     /** Reads back the server's current per-client latency (client id → ms) from the host's
      *  live status, so every commit/restore write can be confirmed and retried. Null skips
      *  read-back (a silent SetLatency failure then goes uncaught — host should supply it). */
@@ -46,7 +47,16 @@ class SyncCalibrator(
     /** Records pre-run latencies so a process death mid-run can be undone on restart (see
      *  [CalibrationJournal] and [recover]). Null disables crash recovery. */
     private val journal: CalibrationJournal? = null,
+    /** Builds the [Measurer] for a run's ring. Null uses the real mic measurer; tests inject
+     *  a factory returning a fake to drive the orchestration deterministically. */
+    private val measurerFactory: ((ReferencePcmRing) -> Measurer)? = null,
 ) {
+
+    /** The production measurer: records the mic and correlates against [ring]. */
+    private fun micMeasurer(ring: ReferencePcmRing) = object : Measurer {
+        override suspend fun measure(peakCount: Int) = micMeasure(ring, peakCount)
+        override suspend fun measureHalves(peakCount: Int) = micMeasureHalves(ring, peakCount)
+    }
 
     data class CalClient(
         val id: String,
@@ -91,6 +101,7 @@ class SyncCalibrator(
         }
         intended.clear()
         val ring = ReferencePcmRing()
+        val measurer = measurerFactory?.invoke(ring) ?: micMeasurer(ring)
         tapArm(ring)
         // Record every client's pre-run latency BEFORE the first mutating write, so a
         // process death mid-run is undone on the next start (see [recover]). Cleared in
@@ -102,9 +113,9 @@ class SyncCalibrator(
             progress("priming reference ring (${RING_PRIME_MS / 1000}s)…")
             delay(RING_PRIME_MS)
             result = if (clients.size >= 3) {
-                calibrateSimultaneous(ring, clients)
+                calibrateSimultaneous(measurer, clients)
             } else {
-                calibrateMutedPairs(ring, clients)
+                calibrateMutedPairs(measurer, clients)
             }
         } finally {
             tapArm(null)
@@ -133,7 +144,7 @@ class SyncCalibrator(
     // ---- v1 strategy: sequential pair rounds, others muted -------------------------
 
     private suspend fun calibrateMutedPairs(
-        ring: ReferencePcmRing,
+        measurer: Measurer,
         clients: List<CalClient>,
     ): Boolean {
         val reference = clients.first()
@@ -144,7 +155,7 @@ class SyncCalibrator(
             val others = targets.filter { it.id != target.id }
             // A failed pair (e.g. a silent/remote web client that never produces a
             // peak) is restored + reported but must not abort the remaining pairs.
-            val outcome = mutedPairRound(ring, reference, target, others)
+            val outcome = mutedPairRound(measurer, reference, target, others)
             if (outcome != null) successes++
             results += outcome ?: "${target.name}: failed (see log)"
         }
@@ -155,7 +166,7 @@ class SyncCalibrator(
     /** One isolated pair round: mutes [others], calibrates [target] against [reference],
      *  restores volumes. Also the fallback path for unattributed simultaneous targets. */
     private suspend fun mutedPairRound(
-        ring: ReferencePcmRing,
+        measurer: Measurer,
         reference: CalClient,
         target: CalClient,
         others: List<CalClient>,
@@ -166,7 +177,7 @@ class SyncCalibrator(
                 others.forEach { control.sendSetVolume(it.id, muted = true, percent = it.volumePercent) }
                 delay(SETTLE_MS)
             }
-            return calibratePair(ring, reference, target)
+            return calibratePair(measurer, reference, target)
         } finally {
             others.forEach { control.sendSetVolume(it.id, muted = it.muted, percent = it.volumePercent) }
         }
@@ -174,12 +185,12 @@ class SyncCalibrator(
 
     /** Returns a human summary on success, null on failure (target latency restored). */
     private suspend fun calibratePair(
-        ring: ReferencePcmRing,
+        measurer: Measurer,
         reference: CalClient,
         target: CalClient,
     ): String? {
         progress("measuring baseline (${reference.name} vs ${target.name})…")
-        val baseline = measure(ring) ?: return failPair(target, "baseline measurement failed")
+        val baseline = measurer.measure(4) ?: return failPair(target, "baseline measurement failed")
 
         // Probe BOTH the reference and the target, each by its own offset, and identify
         // both by DISPLACEMENT — same common-mode fix as the batch path. Electing the
@@ -191,7 +202,7 @@ class SyncCalibrator(
         control.sendSetLatency(reference.id, reference.latencyMs - refOff)
         control.sendSetLatency(target.id, target.latencyMs - tgtOff)
         delay(SETTLE_MS)
-        val probed = measure(ring) ?: run {
+        val probed = measurer.measure(4) ?: run {
             commitLatency(reference.id, reference.latencyMs)
             return failPair(target, "probe measurement failed")
         }
@@ -219,11 +230,11 @@ class SyncCalibrator(
         progress("applying ${newLatency}ms to ${target.name}, verifying…")
         control.sendSetLatency(target.id, newLatency) // transient — re-probed for verify below
         delay(SETTLE_MS)
-        val vBase = measure(ring) ?: return failPair(target, "verify baseline failed")
+        val vBase = measurer.measure(4) ?: return failPair(target, "verify baseline failed")
         control.sendSetLatency(reference.id, reference.latencyMs - refOff)
         control.sendSetLatency(target.id, newLatency - tgtOff)
         delay(SETTLE_MS)
-        val vProbed = measure(ring)
+        val vProbed = measurer.measure(4)
         commitLatency(reference.id, reference.latencyMs) // remove reference probe
         if (vProbed == null) return failPair(target, "verify probe failed")
         // Strongest verify-probed peak that sits `off` past some verify-baseline leader.
@@ -247,7 +258,7 @@ class SyncCalibrator(
     // ---- v2 strategy: simultaneous probes, nothing muted ---------------------------
 
     private suspend fun calibrateSimultaneous(
-        ring: ReferencePcmRing,
+        measurer: Measurer,
         clients: List<CalClient>,
     ): Boolean {
         val reference = clients.first()
@@ -272,7 +283,7 @@ class SyncCalibrator(
         try {
             batch@ do {
                 progress("measuring baseline (${sim.size + 1} speakers audible)…")
-                val baseline = measure(ring, peakCount)
+                val baseline = measurer.measure(peakCount)
                 if (baseline == null) {
                     // Nothing changed yet; a dead measurement means silence/stall, so
                     // fallback rounds would burn minutes failing the same way.
@@ -289,7 +300,7 @@ class SyncCalibrator(
                 sim.forEachIndexed { i, t -> control.sendSetLatency(t.id, t.latencyMs - targetOffset(i)) }
                 delay(SETTLE_MS)
                 // Halves of the probe capture drive the split-half consistency gate below.
-                val probedTriple = measureHalves(ring, peakCount)
+                val probedTriple = measurer.measureHalves(peakCount)
                 if (probedTriple == null) {
                     commitLatency(reference.id, reference.latencyMs)
                     sim.forEach { commitLatency(it.id, it.latencyMs) }
@@ -386,7 +397,7 @@ class SyncCalibrator(
                     control.sendSetLatency(c.client.id, c.client.latencyMs + c.deltaMs - c.offMs)
                 }
                 delay(SETTLE_MS)
-                val verify = measure(ring, peakCount)
+                val verify = measurer.measure(peakCount)
                 if (verify == null) {
                     toApply.forEach {
                         commitLatency(it.client.id, it.client.latencyMs)
@@ -424,7 +435,7 @@ class SyncCalibrator(
 
             for (target in fallback + overflow.filterNot { isWebClient(it) }) {
                 val others = targets.filter { it.id != target.id }
-                val outcome = mutedPairRound(ring, reference, target, others)
+                val outcome = mutedPairRound(measurer, reference, target, others)
                 if (outcome != null) succeeded += target.id else errored += target.id
                 outcomes[target.id] = outcome ?: "${target.name}: failed (see log)"
             }
@@ -496,12 +507,12 @@ class SyncCalibrator(
     /** Like [measure] but also returns the peaks of each 6 s half of the same capture, for
      *  the split-half consistency gate. Full peaks are salience-filtered as usual; the half
      *  peaks are returned raw (the gate locates a known lag in them, so low z is fine). */
-    private suspend fun measureHalves(
+    private suspend fun micMeasureHalves(
         ring: ReferencePcmRing,
         peakCount: Int,
     ): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>>? {
         repeat(2) { attempt ->
-            val cap = mic.record(CAPTURE_MS)
+            val cap = mic!!.record(CAPTURE_MS)
             if (cap != null) {
                 val snap = ring.snapshot()
                 val full = DelayMeasurement.estimateSpeakerDelays(snap, cap, peakCount)
@@ -525,9 +536,9 @@ class SyncCalibrator(
         return null
     }
 
-    private suspend fun measure(ring: ReferencePcmRing, peakCount: Int = 4): List<Dsp.Peak>? {
+    private suspend fun micMeasure(ring: ReferencePcmRing, peakCount: Int = 4): List<Dsp.Peak>? {
         repeat(2) { attempt ->
-            val capture = mic.record(CAPTURE_MS)
+            val capture = mic!!.record(CAPTURE_MS)
             if (capture != null) {
                 val snapshot = ring.snapshot()
                 val peaks = DelayMeasurement.estimateSpeakerDelays(snapshot, capture, peakCount)
