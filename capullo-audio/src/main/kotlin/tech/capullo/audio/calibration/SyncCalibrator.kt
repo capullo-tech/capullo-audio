@@ -66,6 +66,19 @@ class SyncCalibrator(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state = _state.asStateFlow()
 
+    /** Per-run map of the FINAL latency every mutated client should end at, across every
+     *  path (batch, pair, restores, reference). The last write per client wins, so a
+     *  transient probe followed by a commit/restore records the commit/restore. Reconciled
+     *  once at the end of [calibrate] so no path's write can silently fail. */
+    private val intended = LinkedHashMap<String, Int>()
+
+    /** A FINAL latency write (commit or restore) — records it for run-level read-back.
+     *  Transient probe writes use [control].sendSetLatency directly and are not recorded. */
+    private suspend fun commitLatency(id: String, latencyMs: Int) {
+        control.sendSetLatency(id, latencyMs)
+        intended[id] = latencyMs
+    }
+
     /**
      * Calibrate [clients] (connected snapclients with audible sinks; 2+ entries, first
      * entry = reference whose latency is never changed). Returns true if every target
@@ -76,17 +89,19 @@ class SyncCalibrator(
             _state.value = State.Failed("need at least 2 connected clients, got ${clients.size}")
             return false
         }
+        intended.clear()
         val ring = ReferencePcmRing()
         tapArm(ring)
         // Record every client's pre-run latency BEFORE the first mutating write, so a
         // process death mid-run is undone on the next start (see [recover]). Cleared in
         // the finally once the run has restored/committed on its own.
         journal?.save(clients.associate { it.id to it.latencyMs })
+        var result = false
         try {
             // Let the ring cover more than one full capture before the first measurement.
             progress("priming reference ring (${RING_PRIME_MS / 1000}s)…")
             delay(RING_PRIME_MS)
-            return if (clients.size >= 3) {
+            result = if (clients.size >= 3) {
                 calibrateSimultaneous(ring, clients)
             } else {
                 calibrateMutedPairs(ring, clients)
@@ -94,8 +109,25 @@ class SyncCalibrator(
         } finally {
             tapArm(null)
             journal?.clear()
+            // Run-level read-back: retry the final write of EVERY mutated client (batch,
+            // pair, and every restore) and fail any that stay wrong. A silent failed
+            // restore — client left at latency−probe while we report "restored" — is worse
+            // than a failed commit, and only this run-level pass covers the pair path.
+            val stillBad = reconcile(intended)
+            if (stillBad.isNotEmpty()) {
+                val referenceId = clients.first().id
+                if (referenceId in stillBad) Log.e(TAG, "reference latency read-back failed")
+                val badTargets = stillBad.filterNot { it == referenceId }
+                if (badTargets.isNotEmpty()) {
+                    result = false
+                    val prev = (_state.value as? State.Done)?.summary
+                        ?: (_state.value as? State.Failed)?.reason ?: ""
+                    _state.value = State.Failed("read-back FAILED for $badTargets; $prev")
+                }
+            }
             if (_state.value is State.Running) _state.value = State.Failed("aborted")
         }
+        return result
     }
 
     // ---- v1 strategy: sequential pair rounds, others muted -------------------------
@@ -160,12 +192,11 @@ class SyncCalibrator(
         control.sendSetLatency(target.id, target.latencyMs - tgtOff)
         delay(SETTLE_MS)
         val probed = measure(ring) ?: run {
-            control.sendSetLatency(reference.id, reference.latencyMs)
-            control.sendSetLatency(target.id, target.latencyMs)
+            commitLatency(reference.id, reference.latencyMs)
             return failPair(target, "probe measurement failed")
         }
         val attr = PeakAttribution.attribute(baseline, probed, listOf(refOff, tgtOff), MATCH_TOL_MS)
-        control.sendSetLatency(reference.id, reference.latencyMs) // reference is never corrected
+        commitLatency(reference.id, reference.latencyMs) // reference is never corrected
         val refM = attr.matches[0] ?: return failPair(target, "reference not identified across probe")
         val tgtM = attr.matches[1] ?: return failPair(target, "target peak did not move by the probe")
 
@@ -185,21 +216,15 @@ class SyncCalibrator(
         // cluster) and both probed peaks trace to it, so the residual reads ~0. One extra
         // probe round, acceptable on the fallback path.
         progress("applying ${newLatency}ms to ${target.name}, verifying…")
-        control.sendSetLatency(target.id, newLatency)
+        control.sendSetLatency(target.id, newLatency) // transient — re-probed for verify below
         delay(SETTLE_MS)
-        val vBase = measure(ring) ?: run {
-            control.sendSetLatency(target.id, target.latencyMs)
-            return failPair(target, "verify baseline failed")
-        }
+        val vBase = measure(ring) ?: return failPair(target, "verify baseline failed")
         control.sendSetLatency(reference.id, reference.latencyMs - refOff)
         control.sendSetLatency(target.id, newLatency - tgtOff)
         delay(SETTLE_MS)
         val vProbed = measure(ring)
-        control.sendSetLatency(reference.id, reference.latencyMs) // remove reference probe
-        if (vProbed == null) {
-            control.sendSetLatency(target.id, target.latencyMs)
-            return failPair(target, "verify probe failed")
-        }
+        commitLatency(reference.id, reference.latencyMs) // remove reference probe
+        if (vProbed == null) return failPair(target, "verify probe failed")
         // Strongest verify-probed peak that sits `off` past some verify-baseline leader.
         fun movedBy(off: Int) = vProbed.firstOrNull { p ->
             vBase.any { abs(p.lagMs - it.lagMs - off) <= MATCH_TOL_MS }
@@ -207,15 +232,13 @@ class SyncCalibrator(
         val vRef = movedBy(refOff)
         val vTgt = movedBy(tgtOff)
         if (vRef == null || vTgt == null || vRef === vTgt) {
-            control.sendSetLatency(target.id, target.latencyMs)
             return failPair(target, "verify could not identify reference/target")
         }
         val residualMs = ((vTgt.lagMs - tgtOff) - (vRef.lagMs - refOff)).roundToInt()
         if (abs(residualMs) > PAIR_RESIDUAL_TOL_MS) {
-            control.sendSetLatency(target.id, target.latencyMs)
             return failPair(target, "verify residual ${residualMs}ms > ${PAIR_RESIDUAL_TOL_MS}ms")
         }
-        control.sendSetLatency(target.id, newLatency) // remove verify probe → aligned
+        commitLatency(target.id, newLatency) // remove verify probe → aligned
         return "${target.name}: ${if (deltaMs == 0) "already aligned" else "trim ${deltaMs}ms"} " +
             "(latency $newLatency, residual ${residualMs}ms, verified)"
     }
@@ -243,7 +266,6 @@ class SyncCalibrator(
         val succeeded = mutableSetOf<String>()
         val errored = mutableSetOf<String>() // restored due to a fault (not just deferred)
         val fallback = mutableListOf<CalClient>()
-        val intended = LinkedHashMap<String, Int>() // final latency we expect on the server
 
         overflow.forEach { control.sendSetVolume(it.id, muted = true, percent = it.volumePercent) }
         try {
@@ -268,8 +290,8 @@ class SyncCalibrator(
                 // Halves of the probe capture drive the split-half consistency gate below.
                 val probedTriple = measureHalves(ring, peakCount)
                 if (probedTriple == null) {
-                    control.sendSetLatency(reference.id, reference.latencyMs)
-                    sim.forEach { control.sendSetLatency(it.id, it.latencyMs) }
+                    commitLatency(reference.id, reference.latencyMs)
+                    sim.forEach { commitLatency(it.id, it.latencyMs) }
                     finish(false, "probe measurement failed")
                     return false
                 }
@@ -278,8 +300,7 @@ class SyncCalibrator(
                 val probesMs = PROBE_SET_MS.take(sim.size + 1) // [0]=reference, [1..]=targets
                 val attr = PeakAttribution.attribute(baseline, probed, probesMs, MATCH_TOL_MS)
                 // The reference is never corrected; remove its probe now that it is measured.
-                control.sendSetLatency(reference.id, reference.latencyMs)
-                intended[reference.id] = reference.latencyMs
+                commitLatency(reference.id, reference.latencyMs)
 
                 val refMatch = attr.matches[0]
                 Log.i(
@@ -293,8 +314,9 @@ class SyncCalibrator(
                 )
                 if (refMatch == null) {
                     // Reference could not be identified by its displacement → whole batch
-                    // untrusted. Remove target probes and degrade them to v1 pair rounds.
-                    sim.forEach { control.sendSetLatency(it.id, it.latencyMs) }
+                    // untrusted. Remove target probes and degrade them to v1 pair rounds
+                    // (which re-write and so overwrite these intended entries).
+                    sim.forEach { commitLatency(it.id, it.latencyMs) }
                     progress("reference not identified — degrading to pair rounds")
                     queueFallback(sim, outcomes, fallback)
                     break@batch
@@ -319,7 +341,7 @@ class SyncCalibrator(
                     Candidate(sim[i], i, off, consistent, deltaMs)
                 }
                 val unattributed = sim.indices.filter { attr.matches[it + 1] == null }.map { sim[it] }
-                unattributed.forEach { control.sendSetLatency(it.id, it.latencyMs); intended[it.id] = it.latencyMs }
+                unattributed.forEach { commitLatency(it.id, it.latencyMs) }
                 queueFallback(unattributed, outcomes, fallback)
 
                 // Gate each correction into a plausible band. Skipped targets keep their
@@ -327,8 +349,7 @@ class SyncCalibrator(
                 val toApply = mutableListOf<Candidate>()
                 for (c in candidates) {
                     suspend fun skip(msg: String) {
-                        control.sendSetLatency(c.client.id, c.client.latencyMs)
-                        intended[c.client.id] = c.client.latencyMs
+                        commitLatency(c.client.id, c.client.latencyMs)
                         outcomes[c.client.id] = msg
                     }
                     when (gate(c.deltaMs, c.consistent)) {
@@ -348,7 +369,7 @@ class SyncCalibrator(
                 // target can't reach that, so route it to the robust v1 muted pair path.
                 if (toApply.size == 1) {
                     val only = toApply.single()
-                    control.sendSetLatency(only.client.id, only.client.latencyMs)
+                    commitLatency(only.client.id, only.client.latencyMs)
                     fallback += only.client
                     break@batch
                 }
@@ -366,8 +387,7 @@ class SyncCalibrator(
                 val verify = measure(ring, peakCount)
                 if (verify == null) {
                     toApply.forEach {
-                        control.sendSetLatency(it.client.id, it.client.latencyMs)
-                        intended[it.client.id] = it.client.latencyMs
+                        commitLatency(it.client.id, it.client.latencyMs)
                         errored += it.client.id
                         outcomes[it.client.id] = "${it.client.name}: verify measurement failed — restored"
                     }
@@ -383,18 +403,17 @@ class SyncCalibrator(
                 for (c in toApply) {
                     if (conf.tracked.containsKey(c.idx)) {
                         val newLatency = c.client.latencyMs + c.deltaMs
-                        control.sendSetLatency(c.client.id, newLatency) // remove verify probe
-                        intended[c.client.id] = newLatency
+                        commitLatency(c.client.id, newLatency) // remove verify probe
                         succeeded += c.client.id
                         outcomes[c.client.id] = "${c.client.name}: trim ${c.deltaMs}ms (latency $newLatency, verified)"
                     } else {
                         // Not confirmed — either this target didn't track (glitch /
                         // mis-attribution) or the batch missed quorum (tracked is empty).
                         // Don't discard it: restore and re-measure it on the robust muted
-                        // pair path, so one flaky target can't waste the whole batch.
+                        // pair path (which re-writes, overwriting this intended entry), so
+                        // one flaky target can't waste the whole batch.
                         Log.w(TAG, "${c.client.name}: not confirmed in batch — retrying via pair round")
-                        control.sendSetLatency(c.client.id, c.client.latencyMs)
-                        intended.remove(c.client.id) // pair round owns its final latency
+                        commitLatency(c.client.id, c.client.latencyMs)
                         fallback += c.client
                         outcomes[c.client.id] = "${c.client.name}: not confirmed in batch — retrying via pair round"
                     }
@@ -411,20 +430,8 @@ class SyncCalibrator(
                 outcomes[it.id] = "${it.name}: web client, skipped"
             }
 
-            // Read-back: confirm every batch commit/restore actually took on the server and
-            // retry once; a client that stays wrong is a genuine failure, not a success.
-            reconcile(intended).forEach { id ->
-                if (id == reference.id) {
-                    // The reference is only ever restored to its own value; a stuck probe
-                    // here is a real fault but not a target outcome — log, don't flip State.
-                    Log.e(TAG, "reference ${reference.name} latency read-back failed")
-                    return@forEach
-                }
-                succeeded -= id
-                errored += id
-                outcomes[id] = (outcomes[id] ?: id) + " [read-back FAILED — server did not accept the write]"
-            }
-
+            // Read-back is run-level (in calibrate's finally) so it also covers the pair
+            // path and every restore, not just the batch commits.
             val summary = targets.joinToString("; ") { outcomes[it.id] ?: "${it.name}: ?" }
             // Fail only on a genuine fault with nothing to show for it. An all-deferred /
             // all-already-aligned run (no successes, no faults) is a valid "nothing to do".
@@ -540,7 +547,7 @@ class SyncCalibrator(
      *  the pair loop (other targets may still succeed). */
     private suspend fun failPair(target: CalClient, reason: String): String? {
         Log.w(TAG, "pair ${target.name} failed: $reason — restoring latency ${target.latencyMs}")
-        control.sendSetLatency(target.id, target.latencyMs)
+        commitLatency(target.id, target.latencyMs)
         progress("${target.name}: $reason")
         return null
     }
