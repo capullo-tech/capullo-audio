@@ -50,6 +50,10 @@ object PeakAttribution {
         val matches: List<Attribution?>,
         /** Salient baseline leaders claimed by no probe (unmoved ghosts / silent speakers). */
         val ghostLagsMs: List<Double>,
+        /** Estimated global timeline drift between the baseline and probe captures (ms),
+         *  removed before matching. ~0 normally; large when the two captures are far apart
+         *  or a sink shifted. Logged so "reference not identified" becomes "timeline drift N". */
+        val driftMs: Double = 0.0,
     )
 
     data class Confirmation(
@@ -81,25 +85,71 @@ object PeakAttribution {
         val b = clusterLeaders(baseline)
         val p = clusterLeaders(probed)
 
-        data class Cand(val k: Int, val pi: Int, val bi: Int, val err: Double)
-        val cands = mutableListOf<Cand>()
-        for (k in probesMs.indices) for (pi in p.indices) for (bi in b.indices) {
-            val err = abs((p[pi].lagMs - b[bi].lagMs) - probesMs[k])
-            if (err < matchTolMs && zComparable(p[pi], b[bi])) cands += Cand(k, pi, bi, err)
+        // Greedy assignment for a given global drift: match each entity to a (baseline,
+        // probed) pair whose shift, drift-removed, is within tol of its offset; strongest
+        // probed leader first, then smallest error, each cluster used once.
+        fun matchAt(drift: Double): Array<Attribution?> {
+            data class Cand(val k: Int, val pi: Int, val bi: Int, val err: Double)
+            val cands = mutableListOf<Cand>()
+            for (k in probesMs.indices) for (pi in p.indices) for (bi in b.indices) {
+                val err = abs((p[pi].lagMs - b[bi].lagMs - drift) - probesMs[k])
+                if (err < matchTolMs && zComparable(p[pi], b[bi])) cands += Cand(k, pi, bi, err)
+            }
+            cands.sortWith(compareByDescending<Cand> { p[it.pi].z }.thenBy { it.err })
+            val usedP = BooleanArray(p.size)
+            val usedB = BooleanArray(b.size)
+            val out = arrayOfNulls<Attribution>(probesMs.size)
+            for (c in cands) {
+                if (out[c.k] != null || usedP[c.pi] || usedB[c.bi]) continue
+                out[c.k] = Attribution(c.k, b[c.bi].lagMs, p[c.pi].lagMs, p[c.pi].z)
+                usedP[c.pi] = true; usedB[c.bi] = true
+            }
+            return out
         }
-        cands.sortWith(compareByDescending<Cand> { p[it.pi].z }.thenBy { it.err })
 
-        val usedP = BooleanArray(p.size)
-        val usedB = BooleanArray(b.size)
-        val out = arrayOfNulls<Attribution>(probesMs.size)
-        for (c in cands) {
-            if (out[c.k] != null || usedP[c.pi] || usedB[c.bi]) continue
-            out[c.k] = Attribution(c.k, b[c.bi].lagMs, p[c.pi].lagMs, p[c.pi].z)
-            usedP[c.pi] = true
-            usedB[c.bi] = true
+        // Global timeline drift between the two captures: for a true (entity, baseline,
+        // probed) triple, probed − baseline − offset = drift (direct paths and reflections
+        // agree; fixed ghosts scatter), so drift is the mode of those residuals. But with
+        // few entities and dense spacing a spurious cluster can tie the true one, so only
+        // ADOPT the estimated drift if it attributes strictly more entities than drift=0 —
+        // the normal (near-zero drift) case is never perturbed, and a big inter-capture
+        // shift (the "reference not identified" failure) is recovered.
+        val atZero = matchAt(0.0)
+        val estimate = modalValue(
+            buildList {
+                for (k in probesMs.indices) for (pi in p.indices) for (bi in b.indices) {
+                    if (zComparable(p[pi], b[bi])) add(p[pi].lagMs - b[bi].lagMs - probesMs[k])
+                }
+            },
+            matchTolMs,
+        )
+        var out = atZero
+        var drift = 0.0
+        if (estimate != null && abs(estimate) > matchTolMs) {
+            val atEstimate = matchAt(estimate)
+            if (atEstimate.count { it != null } > atZero.count { it != null }) {
+                out = atEstimate
+                drift = estimate
+            }
         }
-        val ghosts = b.indices.filter { !usedB[it] }.map { b[it].lagMs }
-        return Result(out.toList(), ghosts)
+        val usedB = out.mapNotNull { it?.baselineLagMs }.toSet()
+        val ghosts = b.map { it.lagMs }.filter { it !in usedB }
+        return Result(out.toList(), ghosts, drift)
+    }
+
+    /** The value around which the most of [values] cluster within [tolMs], returned as that
+     *  cluster's mean; null unless at least two values agree (a lone point isn't a mode). */
+    private fun modalValue(values: List<Double>, tolMs: Double): Double? {
+        var best: Double? = null
+        var bestCount = 1
+        for (center in values) {
+            val cluster = values.filter { abs(it - center) <= tolMs }
+            if (cluster.size > bestCount) {
+                bestCount = cluster.size
+                best = cluster.average()
+            }
+        }
+        return best
     }
 
     /**

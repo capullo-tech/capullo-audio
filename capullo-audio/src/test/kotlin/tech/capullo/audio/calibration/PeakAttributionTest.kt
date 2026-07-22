@@ -70,6 +70,31 @@ class PeakAttributionTest {
     }
 
     @Test
+    fun `drift pre-pass recovers a batch whose captures drifted past the tolerance`() {
+        // 120 ms of global timeline drift between baseline and probe — far more than
+        // MATCH_TOL=15, so without the pre-pass no shift matches its offset. With it, the
+        // modal drift is removed and all entities attribute; drift is reported.
+        val baseline = listOf(peak(1200.0, 50.0), peak(1230.0, 40.0), peak(1310.0, 30.0))
+        val probed = listOf( // each = baseline + offset(60/90/150) + 120 drift
+            peak(1380.0, 50.0), peak(1440.0, 40.0), peak(1580.0, 30.0),
+        )
+        val res = PeakAttribution.attribute(baseline, probed, listOf(60, 90, 150), matchTolMs = 15.0)
+        assertEquals(120.0, res.driftMs, 2.0)
+        assertEquals(1200.0, res.matches[0]!!.baselineLagMs, 0.0)
+        assertEquals(1230.0, res.matches[1]!!.baselineLagMs, 0.0)
+        assertEquals(1310.0, res.matches[2]!!.baselineLagMs, 0.0)
+    }
+
+    @Test
+    fun `no drift is inferred when there is none`() {
+        val baseline = listOf(peak(1200.0, 50.0), peak(1230.0, 40.0))
+        val probed = listOf(peak(1260.0, 50.0), peak(1320.0, 40.0)) // +60/+90, no drift
+        val res = PeakAttribution.attribute(baseline, probed, listOf(60, 90), matchTolMs = 15.0)
+        assertEquals(0.0, res.driftMs, 2.0)
+        assertEquals(1200.0, res.matches[0]!!.baselineLagMs, 0.0)
+    }
+
+    @Test
     fun `a reference that fails to move leaves the batch unidentified`() {
         // The reference should move +60 but its peak stayed (glitch) — matches[0] must be
         // null so the caller degrades to pair rounds rather than trusting a bad anchor.

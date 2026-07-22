@@ -197,7 +197,8 @@ class SyncCalibrator(
         }
         val attr = PeakAttribution.attribute(baseline, probed, listOf(refOff, tgtOff), MATCH_TOL_MS)
         commitLatency(reference.id, reference.latencyMs) // reference is never corrected
-        val refM = attr.matches[0] ?: return failPair(target, "reference not identified across probe")
+        val refM = attr.matches[0]
+            ?: return failPair(target, "reference not identified (timeline drift ${attr.driftMs.roundToInt()}ms)")
         val tgtM = attr.matches[1] ?: return failPair(target, "target peak did not move by the probe")
 
         val deltaMs = ((tgtM.probedLagMs - tgtOff) - (refM.probedLagMs - refOff)).roundToInt()
@@ -305,7 +306,8 @@ class SyncCalibrator(
                 val refMatch = attr.matches[0]
                 Log.i(
                     TAG,
-                    "attribution: ref=${refMatch?.let { "%.1f→%.1f".format(it.baselineLagMs, it.probedLagMs) }} " +
+                    "attribution: drift=${"%.0f".format(attr.driftMs)}ms " +
+                        "ref=${refMatch?.let { "%.1f→%.1f".format(it.baselineLagMs, it.probedLagMs) }} " +
                         sim.indices.joinToString {
                             val m = attr.matches[it + 1]
                             "${sim[it].name}@" + (m?.let { "%.1f→%.1f(z=%.1f)".format(it.baselineLagMs, it.probedLagMs, it.z) } ?: "?")
@@ -317,7 +319,7 @@ class SyncCalibrator(
                     // untrusted. Remove target probes and degrade them to v1 pair rounds
                     // (which re-write and so overwrite these intended entries).
                     sim.forEach { commitLatency(it.id, it.latencyMs) }
-                    progress("reference not identified — degrading to pair rounds")
+                    progress("reference not identified (timeline drift ${attr.driftMs.roundToInt()}ms) — degrading to pair rounds")
                     queueFallback(sim, outcomes, fallback)
                     break@batch
                 }
