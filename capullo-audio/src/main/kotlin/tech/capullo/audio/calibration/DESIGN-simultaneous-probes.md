@@ -25,6 +25,21 @@ THREE COMMIT-BLOCKERS (now implemented):
    ≠ write failure). Scope: batch path only — pair-path and probe-failure restores aren't
    read-back-verified (documented gap).
 
+KNOWN LIMITATION — web-client id churn across broadcast sessions (diagnosed 2026-07-22).
+A web (WebAudio) client stores its `qcweb-…` id in `localStorage` (webui index.html:415/426),
+which is origin-scoped. The snapserver's HTTP port is OS-assigned per broadcast session
+(`SnapserverProcess` / `SnapserverPorts.free`, intentional so multiple capullo apps coexist
+on one device), so every broadcast RESTART changes the page origin (`host:port`), wipes
+localStorage, and the client mints a fresh id. Consequences: (a) a web client's committed
+latency does not carry across a broadcast restart — it recalibrates as a new client; (b)
+stale disconnected `qcweb-…` entries accumulate server-side. It is NOT per-run and NOT
+Safari-specific: within a single broadcast session the id is stable (rig-confirmed: one
+`iPhone i9` across three runs) and calibration persists normally. Native (BT) clients are
+unaffected — their id comes from the device, not the browser origin. FIX OPTIONS (deferred):
+pin the HTTP port (trades off the multi-app OS-assigned-port design), or GC long-stale
+disconnected `qcweb-` clients server-side via Client.Delete (must not evict one that will
+reconnect to the same id within the session). For now this is documented, not fixed.
+
 Earlier hardening (still in place): `SyncCalibrator.calibrate` dispatches by client count (3+ → `calibrateSimultaneous`,
 2 → v1 pair round); pure clustering/matching/verify live in `PeakAttribution`.
 
