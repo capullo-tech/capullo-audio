@@ -222,6 +222,14 @@ class SyncCalibrator(
                 .format(refM.baselineLagMs, tgtM.baselineLagMs) +
                 "latency ${target.latencyMs} -> $newLatency",
         )
+        if (abs(deltaMs) <= DEADBAND_MS) {
+            // Already aligned within tolerance (same deadband as the batch). Skip the
+            // verify: with the two speakers coincident their re-probed peaks overlap and
+            // the movedBy step can't tell reference from target — a false "could not
+            // identify". Leave the latency untouched and report aligned.
+            commitLatency(target.id, target.latencyMs)
+            return "${target.name}: already aligned (Δ${deltaMs}ms within deadband)"
+        }
 
         // Verify by re-measuring the residual: apply the correction, then run another
         // reference+target probe round. Identify EACH by the peak that moved by its own

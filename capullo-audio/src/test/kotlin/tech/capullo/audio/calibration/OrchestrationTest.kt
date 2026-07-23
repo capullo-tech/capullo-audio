@@ -88,6 +88,33 @@ class OrchestrationTest {
     }
 
     @Test
+    fun `an already-aligned pair reports aligned instead of failing verify`() {
+        // Two clients only (pair path), target ~12 ms from the reference — within the
+        // deadband. Their probed peaks would overlap, so the verify can't tell them apart;
+        // the deadband must short-circuit to "already aligned" and leave latencies untouched.
+        runTest {
+            val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+            val measurer = SceneMeasurer(
+                control,
+                intrinsic = mapOf("ref" to 1000.0, "t" to 1012.0),
+                z = mapOf("ref" to 40.0, "t" to 30.0),
+            )
+            val cal = SyncCalibrator(
+                tapArm = {},
+                control = control,
+                readLatencies = { control.latency.toMap() },
+                measurerFactory = { measurer },
+            )
+            cal.calibrate(clients("ref" to 0, "t" to 0))
+            val state = cal.state.value
+            assertTrue("state=$state", state is SyncCalibrator.State.Done)
+            assertTrue((state as SyncCalibrator.State.Done).summary.contains("already aligned"))
+            assertEquals(0, control.latency["ref"])
+            assertEquals(0, control.latency["t"])
+        }
+    }
+
+    @Test
     fun `a target that glitches in verify falls back and the batch is not wasted`() = runTest {
         // Same scene, but target b's peak vanishes on the verify measurement (2nd measure()
         // call: 1=baseline, 2=verify). Quorum (>=2) is then unreachable, so BOTH route to
