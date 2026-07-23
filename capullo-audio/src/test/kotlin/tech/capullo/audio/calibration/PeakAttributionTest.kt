@@ -227,6 +227,32 @@ class PeakAttributionTest {
     }
 
     @Test
+    fun `verify pair assigns distinct peaks and reads zero residual on an aligned pair`() {
+        // Aligned pair: both speakers at ~1000 (merged direct + a +13 ms reflection in the
+        // baseline), re-probed +60/+90 with ~18 ms inter-capture drift → 1078 and 1108.
+        // The old "strongest peak per offset" would grab one peak for both; the distinct
+        // assignment must return two peaks, and the residual (drift cancels) must read 0.
+        val vBase = listOf(peak(1000.0, 36.0), peak(1013.0, 26.0))
+        val vProbed = listOf(peak(1078.0, 30.0), peak(1108.0, 24.0))
+        val (vRef, vTgt) = PeakAttribution.assignVerifyPair(vProbed, vBase, 60, 90, 15.0)!!
+        assertTrue("reference and target must be distinct peaks", vRef !== vTgt)
+        assertEquals(1078.0, vRef.lagMs, 0.0)
+        assertEquals(1108.0, vTgt.lagMs, 0.0)
+        val residual = (vTgt.lagMs - 90) - (vRef.lagMs - 60)
+        assertEquals(0.0, residual, 1.0)
+    }
+
+    @Test
+    fun `verify pair reads the true residual on a still-misaligned pair`() {
+        // Target still 40 ms behind the reference after the correction.
+        val vBase = listOf(peak(1000.0, 36.0), peak(1040.0, 30.0))
+        val vProbed = listOf(peak(1060.0, 30.0), peak(1130.0, 24.0)) // ref+60, target(+40)+90
+        val (vRef, vTgt) = PeakAttribution.assignVerifyPair(vProbed, vBase, 60, 90, 15.0)!!
+        val residual = (vTgt.lagMs - 90) - (vRef.lagMs - 60)
+        assertEquals(40.0, residual, 1.0)
+    }
+
+    @Test
     fun `probe set is consensus-safe for the match tolerance`() {
         // For the verify offset-consensus, EVERY value in (offsets ∪ pairwise differences)
         // must be separated by >= 2*MATCH_TOL, so no shifted grid can alias another.

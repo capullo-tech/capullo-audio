@@ -137,6 +137,55 @@ object PeakAttribution {
         return Result(out.toList(), ghosts, drift)
     }
 
+    /**
+     * Pair-path verify matching: given the probed and baseline peaks of a re-probed pair
+     * (reference by [refOffMs], target by [tgtOffMs]), assign each to a DISTINCT probed
+     * cluster leader — never the same one. Picking the strongest peak independently per
+     * offset grabs the SAME peak when the pair is aligned (its re-probed peaks overlap in a
+     * reflective room), a false "could not identify"; a distinct joint assignment doesn't.
+     * Inter-capture drift is removed for the MATCHING (the two captures are ~19 s apart);
+     * it then cancels in the caller's residual = (target−tgtOff) − (ref−refOff). Returns
+     * (referenceLeader, targetLeader) or null if two distinct peaks can't be found.
+     */
+    fun assignVerifyPair(
+        probed: List<Dsp.Peak>,
+        baseline: List<Dsp.Peak>,
+        refOffMs: Int,
+        tgtOffMs: Int,
+        matchTolMs: Double,
+    ): Pair<Dsp.Peak, Dsp.Peak>? {
+        val p = clusterLeaders(probed)
+        val b = clusterLeaders(baseline)
+        if (p.size < 2 || b.isEmpty()) return null
+        val drift = modalValue(
+            buildList {
+                for (off in intArrayOf(refOffMs, tgtOffMs)) for (pp in p) for (bb in b) {
+                    add(pp.lagMs - bb.lagMs - off)
+                }
+            },
+            matchTolMs,
+        ) ?: 0.0
+        data class Cand(val slot: Int, val pi: Int, val err: Double, val z: Double)
+        val cands = mutableListOf<Cand>()
+        intArrayOf(refOffMs, tgtOffMs).forEachIndexed { slot, off ->
+            for (pi in p.indices) {
+                val err = b.minOf { abs(p[pi].lagMs - it.lagMs - off - drift) }
+                if (err <= matchTolMs) cands += Cand(slot, pi, err, p[pi].z)
+            }
+        }
+        cands.sortWith(compareBy<Cand> { it.err }.thenByDescending { it.z })
+        val used = BooleanArray(p.size)
+        val out = arrayOfNulls<Dsp.Peak>(2)
+        for (c in cands) {
+            if (out[c.slot] != null || used[c.pi]) continue
+            out[c.slot] = p[c.pi]
+            used[c.pi] = true
+        }
+        val r = out[0]
+        val t = out[1]
+        return if (r != null && t != null) r to t else null
+    }
+
     /** The value around which the most of [values] cluster within [tolMs], returned as that
      *  cluster's mean; null unless at least two values agree (a lone point isn't a mode). */
     private fun modalValue(values: List<Double>, tolMs: Double): Double? {

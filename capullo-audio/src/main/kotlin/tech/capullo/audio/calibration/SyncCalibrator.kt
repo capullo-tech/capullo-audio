@@ -247,15 +247,11 @@ class SyncCalibrator(
         val vProbed = measurer.measure(4)
         commitLatency(reference.id, reference.latencyMs) // remove reference probe
         if (vProbed == null) return failPair(target, "verify probe failed")
-        // Strongest verify-probed peak that sits `off` past some verify-baseline leader.
-        fun movedBy(off: Int) = vProbed.firstOrNull { p ->
-            vBase.any { abs(p.lagMs - it.lagMs - off) <= MATCH_TOL_MS }
-        }
-        val vRef = movedBy(refOff)
-        val vTgt = movedBy(tgtOff)
-        if (vRef == null || vTgt == null || vRef === vTgt) {
-            return failPair(target, "verify could not identify reference/target")
-        }
+        // Assign reference and target to DISTINCT re-probed peaks (drift-corrected); the
+        // residual is then drift-immune. Avoids the false "could not identify" that picking
+        // the strongest peak per offset causes on an aligned pair in a reflective room.
+        val (vRef, vTgt) = PeakAttribution.assignVerifyPair(vProbed, vBase, refOff, tgtOff, MATCH_TOL_MS)
+            ?: return failPair(target, "verify could not identify reference/target")
         val residualMs = ((vTgt.lagMs - tgtOff) - (vRef.lagMs - refOff)).roundToInt()
         if (abs(residualMs) > PAIR_RESIDUAL_TOL_MS) {
             return failPair(target, "verify residual ${residualMs}ms > ${PAIR_RESIDUAL_TOL_MS}ms")
