@@ -31,6 +31,25 @@ data class SnapserverPorts(
         fun fixed(base: Int) = SnapserverPorts(streamPort = base, tcpPort = base + 1, httpPort = base + 2)
 
         /**
+         * [fixed] ports iff all three actually bind right now, else null so the caller can
+         * fall back to [free]. A user-editable fixed base can collide (busy port, two capullo
+         * apps sharing a base, a stale snapserver still holding the trio); without this a
+         * collision would leave the broadcast silently dead. Pre-flights the same way [free]
+         * does — bind, then close before Snapserver binds them a beat later.
+         */
+        fun fixedIfFree(base: Int): SnapserverPorts? {
+            val opened = mutableListOf<ServerSocket>()
+            return try {
+                for (p in intArrayOf(base, base + 1, base + 2)) opened += ServerSocket(p)
+                SnapserverPorts(streamPort = base, tcpPort = base + 1, httpPort = base + 2)
+            } catch (e: Exception) {
+                null
+            } finally {
+                opened.forEach { runCatching { it.close() } }
+            }
+        }
+
+        /**
          * Three distinct free ephemeral ports. The sockets are opened simultaneously so the OS
          * hands out three different ports, then closed immediately before Snapserver binds them
          * (a negligible TOCTOU window - Snapserver binds within a beat of construction).
