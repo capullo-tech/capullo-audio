@@ -24,6 +24,12 @@ data class SnapserverPorts(
         /** Legacy fixed ports (stream/tcp/http = 1604/1605/1680). */
         val Fixed = SnapserverPorts(streamPort = 1604, tcpPort = 1605, httpPort = 1680)
 
+        /** Three consecutive ports from [base] (base / base+1 / base+2). A fixed port keeps
+         *  the server's address stable across broadcast restarts, so snapclients reconnect
+         *  to the same host:port without rediscovery and the web player's origin (hence its
+         *  localStorage) doesn't reset. Trade-off: two capullo apps must not share a base. */
+        fun fixed(base: Int) = SnapserverPorts(streamPort = base, tcpPort = base + 1, httpPort = base + 2)
+
         /**
          * Three distinct free ephemeral ports. The sockets are opened simultaneously so the OS
          * hands out three different ports, then closed immediately before Snapserver binds them
