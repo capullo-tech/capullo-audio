@@ -13,8 +13,8 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        // 24 = ≤ every consuming app (Telecloud is 24, QuantumCast 26); Compose floor is well below.
-        minSdk = 24
+        // 23 = ≤ every consuming app (Telecloud is 23, QuantumCast 26); Compose floor is 23 too.
+        minSdk = 23
         consumerProguardFiles("consumer-rules.pro")
     }
 
