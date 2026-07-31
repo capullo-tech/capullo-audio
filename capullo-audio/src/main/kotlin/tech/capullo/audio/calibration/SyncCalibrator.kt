@@ -786,13 +786,24 @@ class SyncCalibrator(
          *  Tighter than MATCH_TOL since it's a direct re-derived offset, not a matching. */
         private const val PAIR_RESIDUAL_TOL_MS = 12
 
-        /** Simultaneous probe offsets (slot 0 = reference, rest = targets). Chosen so
-         *  every value in (offsets ∪ pairwise differences) is separated by ≥ 2×MATCH_TOL:
-         *  {60,90,210,390} → offsets and diffs {30,120,150,180,300,330} are all distinct
-         *  multiples of 30, so no shifted grid can be confused with another (needed for
-         *  the verify offset-consensus, not just pairwise attribution). One slot goes to
-         *  the reference, so this caps a batch at PROBE_SET_MS.size − 1 targets. */
-        val PROBE_SET_MS = listOf(60, 90, 210, 390)
+        /**
+         * Simultaneous probe offsets (slot 0 = reference, rest = targets): a Sidon set, so every
+         * value in (offsets ∪ pairwise differences) is distinct and no shifted grid can be confused
+         * with another. Here that union is {90,180,270,360}, a **90 ms minimum gap**.
+         *
+         * The gap must exceed the ROOM REFLECTION SPREAD, not merely 2×MATCH_TOL. The previous set
+         * {60,90,210,390} satisfied the tolerance rule (30 ms gaps = 2×MATCH_TOL) but rig-measured
+         * reflections spread 50-80 ms around a direct path, so a speaker's own reflection could sit
+         * exactly where another speaker's probe shift was expected: with offsets 60 and 90, a
+         * reference reflection 30 ms late masquerades perfectly as the target. That produced
+         * confident, verify-passing corrections that disagreed across runs by tens of ms.
+         *
+         * Cost of the fix: three slots instead of four, so a batch covers 2 targets and the rest
+         * degrade to pair rounds. Correctness over capacity — a bigger batch is worthless if its
+         * attributions are ambiguous. Max offset 360 ms stays below the old 390 ms, so the
+         * stream-hiccup risk of a large latency step does not get worse.
+         */
+        val PROBE_SET_MS = listOf(90, 180, 360)
 
         private const val WEB_CLIENT_PREFIX = "qcweb-"
 
