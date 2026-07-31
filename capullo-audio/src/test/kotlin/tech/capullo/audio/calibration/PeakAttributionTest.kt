@@ -1,6 +1,7 @@
 package tech.capullo.audio.calibration
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -263,5 +264,42 @@ class PeakAttributionTest {
         val sorted = values.toList()
         val minGap = sorted.zipWithNext { a, b -> b - a }.min()
         assertTrue("grid values must be >= 2*MATCH_TOL apart, min gap was $minGap", minGap >= 2 * 15)
+    }
+
+    @Test
+    fun `a louder reflection does not displace the direct path`() {
+        // The failure this guards: a speaker's reflection in the baseline paired with the SAME
+        // reflection in the probed capture shifts by exactly the probe offset, so it is a
+        // ZERO-error match that merely reports a lag later than the truth by the reflection delay.
+        // Ranking candidates by salience picked it whenever the reflection out-peaked the direct
+        // path, and rig reflections run 50-80ms - the scale of the correction errors seen on-rig.
+        val refOff = 90
+        val tgtOff = 180
+        val baseline = listOf(
+            Dsp.Peak(1000.0, 30.0), // reference direct
+            Dsp.Peak(1200.0, 10.0), // target direct  (quiet)
+            Dsp.Peak(1240.0, 25.0), // target reflection, 40ms late and LOUDER
+        )
+        val probed = listOf(
+            Dsp.Peak(1000.0 + refOff, 30.0),
+            Dsp.Peak(1200.0 + tgtOff, 10.0),
+            Dsp.Peak(1240.0 + tgtOff, 25.0),
+        )
+        val r = PeakAttribution.attribute(baseline, probed, listOf(refOff, tgtOff), 15.0)
+        val target = r.matches[1]
+        assertNotNull("target must be attributed", target)
+        assertEquals("must lock onto the direct path, not the louder reflection", 1380.0, target!!.probedLagMs, 0.01)
+        assertEquals(1200.0, target.baselineLagMs, 0.01)
+    }
+
+    @Test
+    fun `a cluster is represented by its earliest member, not its loudest`() {
+        // Within one cluster the earliest arrival is the direct path and everything after it is a
+        // reflection of the same sound, so taking the loudest biased the reported lag later.
+        val leaders = PeakAttribution.clusterLeaders(
+            listOf(Dsp.Peak(1000.0, 10.0), Dsp.Peak(1005.0, 30.0)),
+        )
+        assertEquals("the two peaks are one cluster", 1, leaders.size)
+        assertEquals(1000.0, leaders[0].lagMs, 0.01)
     }
 }

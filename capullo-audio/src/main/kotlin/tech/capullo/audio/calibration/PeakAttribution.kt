@@ -28,6 +28,20 @@ object PeakAttribution {
      *  material) from stealing a probe match from a quiet speaker. */
     const val Z_RATIO_MAX = 3.0
 
+    /**
+     * Match errors within this of each other count as equally good, and the EARLIEST arrival then
+     * wins. Sound reaches the mic by the direct path before any reflection of it, so among equally
+     * plausible candidates the earliest is the physical one.
+     *
+     * This matters because a reflection is not a weak copy that a salience test can reject: a
+     * speaker's reflection in the baseline paired with the SAME reflection in the probed capture
+     * shifts by exactly the probe offset, so it is a zero-error match that simply reports a lag
+     * later than the truth by the reflection delay. Ranking by salience picked it whenever
+     * constructive interference made a reflection out-peak the direct path, and rig-measured
+     * reflections run 50-80 ms — the same scale as the correction errors observed.
+     */
+    const val EARLIEST_TIE_MS = 3.0
+
     /** Verify consensus must land at least this many probed targets at reference+offset.
      *  Two coincident hits on a Sidon grid are far harder to fake than one, so a single
      *  spurious match cannot elect a reference. The single-target case can't reach this
@@ -95,7 +109,14 @@ object PeakAttribution {
                 val err = abs((p[pi].lagMs - b[bi].lagMs - drift) - probesMs[k])
                 if (err < matchTolMs && zComparable(p[pi], b[bi])) cands += Cand(k, pi, bi, err)
             }
-            cands.sortWith(compareByDescending<Cand> { p[it.pi].z }.thenBy { it.err })
+            // Rank by match quality, then by EARLIEST arrival, then salience. Errors within
+            // EARLIEST_TIE_MS are treated as equal so the direct path beats a reflection that
+            // matches just as well (see EARLIEST_TIE_MS) rather than losing to it on z.
+            cands.sortWith(
+                compareBy<Cand> { (it.err / EARLIEST_TIE_MS).toInt() }
+                    .thenBy { p[it.pi].lagMs }
+                    .thenByDescending { p[it.pi].z },
+            )
             val usedP = BooleanArray(p.size)
             val usedB = BooleanArray(b.size)
             val out = arrayOfNulls<Attribution>(probesMs.size)
@@ -173,7 +194,13 @@ object PeakAttribution {
                 if (err <= matchTolMs) cands += Cand(slot, pi, err, p[pi].z)
             }
         }
-        cands.sortWith(compareBy<Cand> { it.err }.thenByDescending { it.z })
+        // Same rule as the batch matcher: equal-quality matches are resolved by earliest arrival,
+        // so a reflection cannot stand in for the direct path just by being louder.
+        cands.sortWith(
+            compareBy<Cand> { (it.err / EARLIEST_TIE_MS).toInt() }
+                .thenBy { p[it.pi].lagMs }
+                .thenByDescending { it.z },
+        )
         val used = BooleanArray(p.size)
         val out = arrayOfNulls<Dsp.Peak>(2)
         for (c in cands) {
@@ -249,12 +276,16 @@ object PeakAttribution {
         else Confirmation(null, emptyMap())
     }
 
-    /** Collapse peaks into clusters, strongest first: a peak within [clusterMs] of an
-     *  already-kept leader joins that cluster. Returns the leaders, strongest first. */
+    /** Collapse peaks into clusters seeded strongest-first: a peak within [clusterMs] of an
+     *  already-kept leader joins that cluster. The cluster is then REPRESENTED BY ITS EARLIEST
+     *  member, not its loudest — within one cluster the earliest arrival is the direct path and
+     *  anything after it is a reflection of the same sound, so taking the loudest biased the lag
+     *  later by up to [clusterMs]. Salience still decides which peaks seed clusters at all. */
     fun clusterLeaders(peaks: List<Dsp.Peak>, clusterMs: Double = CLUSTER_MS): List<Dsp.Peak> {
         val leaders = mutableListOf<Dsp.Peak>()
         for (p in peaks.sortedByDescending { it.z }) {
-            if (leaders.none { abs(it.lagMs - p.lagMs) <= clusterMs }) leaders += p
+            val i = leaders.indexOfFirst { abs(it.lagMs - p.lagMs) <= clusterMs }
+            if (i < 0) leaders += p else if (p.lagMs < leaders[i].lagMs) leaders[i] = p
         }
         return leaders
     }
