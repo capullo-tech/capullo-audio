@@ -52,6 +52,12 @@ class SyncCalibrator(
     /** Builds the [Measurer] for a run's ring. Null uses the real mic measurer; tests inject
      *  a factory returning a fake to drive the orchestration deterministically. */
     private val measurerFactory: ((ReferencePcmRing) -> Measurer)? = null,
+    /** Broadcasts client-side OS media-volume boost leases (client id → target percent), or clears
+     *  them all with an empty map. The knob to use when a target's SW gain is already at 100% and so
+     *  has no headroom left. Takes a MAP because the no-mute batch boosts several speakers at once.
+     *  Null when the host offers no such channel, in which case a default-volume target simply
+     *  stays unboostable. See [OsVolumeBoost]. */
+    private val publishOsBoost: (suspend (targets: Map<String, Int>, leaseMs: Long) -> Unit)? = null,
 ) {
 
     /** The production measurer: records the mic and correlates against [ring]. */
@@ -104,11 +110,19 @@ class SyncCalibrator(
         intended.clear()
         val ring = ReferencePcmRing()
         val measurer = measurerFactory?.invoke(ring) ?: micMeasurer(ring)
+        // Journal every client's pre-run latency AND volume BEFORE the first mutating write, so
+        // a process death mid-run is undone on the next start (see [recover]). Volume matters
+        // because the muted-pair fallback silences other clients — an un-journaled crash there
+        // would strand a room muted. If the journal can't be durably written, abort rather than
+        // mutate un-recoverably. Cleared in the finally once the run has restored/committed.
+        if (journal != null && !journal.save(
+                clients.associate { it.id to ClientSnapshot(it.latencyMs, it.volumePercent, it.muted) },
+            )
+        ) {
+            _state.value = State.Failed("could not journal pre-run state — aborting to stay crash-safe")
+            return false
+        }
         tapArm(ring)
-        // Record every client's pre-run latency BEFORE the first mutating write, so a
-        // process death mid-run is undone on the next start (see [recover]). Cleared in
-        // the finally once the run has restored/committed on its own.
-        journal?.save(clients.associate { it.id to it.latencyMs })
         var result = false
         try {
             // Let the ring cover more than one full capture before the first measurement.
@@ -157,7 +171,27 @@ class SyncCalibrator(
             val others = targets.filter { it.id != target.id }
             // A failed pair (e.g. a silent/remote web client that never produces a
             // peak) is restored + reported but must not abort the remaining pairs.
-            val outcome = mutedPairRound(measurer, reference, target, others)
+            //
+            // UNBOOSTED first. This is the PRIMARY path at N=2, where `others` is empty so nothing
+            // is muted and the listener is hearing both speakers: shouting a target to full volume
+            // on every routine calibration is exactly the disruption the no-mute design exists to
+            // avoid. Boost only buys detectability, so it costs nothing to find out we didn't need
+            // it — and only a target that actually failed pays for the retry.
+            //
+            // Then a COARSE RAMP rather than a jump to full volume. Rig-measured: one speaker alone
+            // put 0 peaks over the z=9 floor at 25% device volume, 4 at 50%, but 9 at 75% — because
+            // raising the level lifts its ROOM REFLECTIONS over the floor too, and those ghosts
+            // cluster within ~50 ms while the probe offsets are only 30 ms apart. Louder is
+            // therefore not monotonically better: past the floor it degrades attribution. So try the
+            // modest level first and escalate only if that failed to find the speaker at all.
+            var outcome = mutedPairRound(measurer, reference, target, others, boostPercent = null)
+            if (outcome == null && canBoost(target)) {
+                for (level in BOOST_RAMP_PERCENT) {
+                    progress("${target.name}: retrying with a $level% detectability boost")
+                    outcome = mutedPairRound(measurer, reference, target, others, boostPercent = level)
+                    if (outcome != null) break
+                }
+            }
             if (outcome != null) successes++
             results += outcome ?: "${target.name}: failed (see log)"
         }
@@ -165,23 +199,82 @@ class SyncCalibrator(
         return successes == targets.size
     }
 
-    /** One isolated pair round: mutes [others], calibrates [target] against [reference],
-     *  restores volumes. Also the fallback path for unattributed simultaneous targets. */
+    /** True if [target] has any loudness headroom left to give (and may be touched at all).
+     *  A user mute is explicit intent — R6: we exclude such a client, never unmute it. */
+    private fun canBoost(target: CalClient): Boolean = !target.muted &&
+        (target.volumePercent < BOOST_RAMP_PERCENT.last() || (publishOsBoost != null && !isWebClient(target)))
+
+    /** One isolated pair round: mutes [others], calibrates [target] against [reference], then
+     *  restores every volume. Used both as the N=2 primary path and as the fallback for targets
+     *  the no-mute batch couldn't attribute.
+     *
+     *  [boostPercent] (null = no boost) raises volume for the round so a quiet/distant speaker
+     *  becomes measurable. It is OPT-IN per round rather than automatic: at N=2 nothing is muted and
+     *  the listener is hearing the room, so a routine calibration must not shout — the caller boosts
+     *  only on a retry, after an unboosted attempt actually failed. The boost is transient (restored
+     *  in the finally along with the muted others) and never touches a user-muted client. Timing is
+     *  unaffected: a boost changes peak height, not peak spacing, so the measured latency delta is
+     *  volume-independent. The pre-boost volume is already in the crash journal (saved for every
+     *  client before the first write), so a process death mid-boost is recovered on the next start.
+     *
+     *  THE REFERENCE IS BOOSTED TOO. It is never *corrected* (its latency is untouched), but it must
+     *  still be FOUND, and it is just as able to be too quiet as any target — rig-observed: at 25%
+     *  device volume the reference produced zero above-floor peaks and every round died with
+     *  "reference not identified". Leaving the one speaker everything is measured against out of the
+     *  boost was a hole: a quiet reference fails the whole calibration, not just its own row. */
     private suspend fun mutedPairRound(
         measurer: Measurer,
         reference: CalClient,
         target: CalClient,
         others: List<CalClient>,
+        boostPercent: Int?,
     ): String? {
+        // Knob selection: use whichever stage of the gain chain actually has headroom. The SW gain
+        // is server-side, instant and non-intrusive, so prefer it — but it sits at 100% by default,
+        // and then the ONLY headroom is the client's own OS media volume (which drives its paired BT
+        // sink too, rig-proven). Boosting SW when it is already maxed would be a no-op, which is
+        // exactly the hole this fixes.
+        val boost = boostPercent != null
+        val swBoost = boost && !target.muted && target.volumePercent < boostPercent!!
+        val osBoost = boost && !target.muted && !swBoost && publishOsBoost != null && !isWebClient(target)
+        // Same treatment for the reference, independently: it may need a different knob than the
+        // target, and it is skipped entirely if it already has the level to be found.
+        val refSwBoost = boost && !reference.muted && reference.volumePercent < boostPercent!!
+        val refOsBoost = boost && !reference.muted && !refSwBoost &&
+            publishOsBoost != null && !isWebClient(reference)
         try {
             if (others.isNotEmpty()) {
                 progress("muting ${others.size} other client(s) for pair isolation")
                 others.forEach { control.sendSetVolume(it.id, muted = true, percent = it.volumePercent) }
-                delay(SETTLE_MS)
             }
+            if (swBoost) {
+                progress("boosting ${target.name} to $boostPercent% for detectability")
+                control.sendSetVolume(target.id, muted = false, percent = boostPercent!!)
+            }
+            if (refSwBoost) {
+                progress("boosting reference ${reference.name} to $boostPercent% so it can be found")
+                control.sendSetVolume(reference.id, muted = false, percent = boostPercent!!)
+            }
+            // One lease covers both device-volume boosts: the payload is a list, and issuing it once
+            // avoids a second metadata publish (each re-serializes the host's art blob).
+            val osTargets = buildMap {
+                if (osBoost) put(target.id, boostPercent!!)
+                if (refOsBoost) put(reference.id, boostPercent!!)
+            }
+            if (osTargets.isNotEmpty()) {
+                progress("boosting device volume for detectability (${osTargets.size} speaker(s))")
+                publishOsBoost?.invoke(osTargets, OS_BOOST_LEASE_MS)
+            }
+            if (others.isNotEmpty() || swBoost || refSwBoost || osTargets.isNotEmpty()) delay(SETTLE_MS)
             return calibratePair(measurer, reference, target)
         } finally {
             others.forEach { control.sendSetVolume(it.id, muted = it.muted, percent = it.volumePercent) }
+            if (swBoost) control.sendSetVolume(target.id, muted = target.muted, percent = target.volumePercent)
+            if (refSwBoost) {
+                control.sendSetVolume(reference.id, muted = reference.muted, percent = reference.volumePercent)
+            }
+            // Explicit release so the volume drops immediately; the lease is only the crash failsafe.
+            if (osBoost || refOsBoost) publishOsBoost?.invoke(emptyMap(), 0)
         }
     }
 
@@ -211,7 +304,12 @@ class SyncCalibrator(
         val attr = PeakAttribution.attribute(baseline, probed, listOf(refOff, tgtOff), MATCH_TOL_MS)
         commitLatency(reference.id, reference.latencyMs) // reference is never corrected
         val refM = attr.matches[0]
-            ?: return failPair(target, "reference not identified (timeline drift ${attr.driftMs.roundToInt()}ms)")
+            ?: return failPair(
+                target,
+                "reference speaker ${reference.name} was not detected — it is probably too quiet or " +
+                    "too far from this phone; raise its volume and re-run " +
+                    "(timeline drift ${attr.driftMs.roundToInt()}ms)",
+            )
         val tgtM = attr.matches[1] ?: return failPair(target, "target peak did not move by the probe")
 
         val deltaMs = ((tgtM.probedLagMs - tgtOff) - (refM.probedLagMs - refOff)).roundToInt()
@@ -285,8 +383,29 @@ class SyncCalibrator(
         val succeeded = mutableSetOf<String>()
         val errored = mutableSetOf<String>() // restored due to a fault (not just deferred)
         val fallback = mutableListOf<CalClient>()
+        val webRetry = mutableListOf<CalClient>() // web clients worth one boosted re-measurement
 
         overflow.forEach { control.sendSetVolume(it.id, muted = true, percent = it.volumePercent) }
+
+        // Detectability pre-boost. The batch mutes nothing, so this is its only loudness lever, and
+        // a speaker left far below full volume cannot clear the peak floor however good the
+        // attribution is. It matters most for WEB clients: they are skipped by the muted pair
+        // fallback entirely, so the batch is their only measurement and this their only rescue.
+        //
+        // Gentle by construction, per the "detect without going too loud" rule: it lifts to a FLOOR
+        // rather than to the cap, and only touches clients already below that floor, so speakers the
+        // listener had at a sane level are left exactly where they were. Restored in the finally.
+        //
+        // Deliberately EAGER (before the baseline) rather than a boost-then-re-measure round: which
+        // speaker is too quiet cannot be known before attribution succeeds, and attribution is the
+        // very thing failing, so a lazy round would cost a second full baseline+probe. Acting on the
+        // volumes the server already knows is free.
+        val preBoost = sim.filter { !it.muted && it.volumePercent < BOOST_FLOOR_PERCENT }
+        if (preBoost.isNotEmpty()) {
+            progress("raising ${preBoost.size} quiet client(s) to $BOOST_FLOOR_PERCENT% for detectability")
+            preBoost.forEach { control.sendSetVolume(it.id, muted = false, percent = BOOST_FLOOR_PERCENT) }
+            delay(SETTLE_MS)
+        }
         try {
             batch@ do {
                 progress("measuring baseline (${sim.size + 1} speakers audible)…")
@@ -337,8 +456,11 @@ class SyncCalibrator(
                     // untrusted. Remove target probes and degrade them to v1 pair rounds
                     // (which re-write and so overwrite these intended entries).
                     sim.forEach { commitLatency(it.id, it.latencyMs) }
-                    progress("reference not identified (timeline drift ${attr.driftMs.roundToInt()}ms) — degrading to pair rounds")
-                    queueFallback(sim, outcomes, fallback)
+                    progress(
+                        "reference speaker ${reference.name} was not detected (too quiet or too far?) " +
+                            "— degrading to pair rounds (timeline drift ${attr.driftMs.roundToInt()}ms)",
+                    )
+                    queueFallback(sim, outcomes, fallback, webRetry)
                     break@batch
                 }
                 val refProbed = refMatch.probedLagMs
@@ -362,7 +484,7 @@ class SyncCalibrator(
                 }
                 val unattributed = sim.indices.filter { attr.matches[it + 1] == null }.map { sim[it] }
                 unattributed.forEach { commitLatency(it.id, it.latencyMs) }
-                queueFallback(unattributed, outcomes, fallback)
+                queueFallback(unattributed, outcomes, fallback, webRetry)
 
                 // Gate each correction into a plausible band. Skipped targets keep their
                 // current latency (explicit re-write — they still carry a batch probe).
@@ -443,12 +565,29 @@ class SyncCalibrator(
 
             for (target in fallback + overflow.filterNot { isWebClient(it) }) {
                 val others = targets.filter { it.id != target.id }
-                val outcome = mutedPairRound(measurer, reference, target, others)
+                // Boost here: this round only runs because the batch already failed to attribute
+                // the target, and the others are muted for it anyway.
+                val outcome = mutedPairRound(measurer, reference, target, others, boostPercent = BOOST_RAMP_PERCENT.first())
                 if (outcome != null) succeeded += target.id else errored += target.id
                 outcomes[target.id] = outcome ?: "${target.name}: failed (see log)"
             }
+            // Targeted rescue for web clients the batch couldn't attribute. They have no muted
+            // fallback and no OS volume of their own, so without this a single noisy capture ends
+            // their story. Bounded: fires only on failure, one extra round each, and nothing is
+            // muted for it (the boost alone is the lever).
+            for (target in webRetry) {
+                progress("re-measuring ${target.name} at full volume…")
+                val outcome = mutedPairRound(
+                    measurer, reference, target, others = emptyList(),
+                    boostPercent = BOOST_RAMP_PERCENT.last(),
+                )
+                if (outcome != null) succeeded += target.id
+                outcomes[target.id] = outcome
+                    ?: "${target.name}: too quiet to measure even at full volume — " +
+                    "move it closer or raise its device volume, then re-run"
+            }
             overflow.filter { isWebClient(it) }.forEach {
-                outcomes[it.id] = "${it.name}: web client, skipped"
+                outcomes[it.id] = "${it.name}: web client, skipped (too many speakers for one batch)"
             }
 
             // Read-back is run-level (in calibrate's finally) so it also covers the pair
@@ -461,6 +600,9 @@ class SyncCalibrator(
                 targets.all { it.id in succeeded || isWebClient(it) }
         } finally {
             overflow.forEach { control.sendSetVolume(it.id, muted = it.muted, percent = it.volumePercent) }
+            // Undo the detectability pre-boost. Last, so a fallback pair round (which may have
+            // boosted the same client again) has already finished and restored its own writes.
+            preBoost.forEach { control.sendSetVolume(it.id, muted = it.muted, percent = it.volumePercent) }
         }
     }
 
@@ -498,12 +640,21 @@ class SyncCalibrator(
         unattributed: List<CalClient>,
         outcomes: MutableMap<String, String>,
         fallback: MutableList<CalClient>,
+        webRetry: MutableList<CalClient>,
     ) {
         for (client in unattributed) {
-            if (isWebClient(client)) {
-                outcomes[client.id] = "${client.name}: unattributed (web client, skipped)"
-            } else {
+            if (!isWebClient(client)) {
                 fallback += client
+            } else if (!client.muted && client.volumePercent < BOOST_RAMP_PERCENT.last()) {
+                // A web client has no muted fallback round and no OS volume of its own, so the batch
+                // is its ONLY measurement — one noisy capture would otherwise end its story. Give it
+                // the one thing left: its SW gain raised to full, and a single re-measurement.
+                webRetry += client
+            } else {
+                // Already at full SW gain (or muted): nothing left to give. Say so in terms the
+                // listener can act on rather than reporting an opaque skip.
+                outcomes[client.id] = "${client.name}: too quiet to measure at full volume — " +
+                    "move it closer or raise its device volume, then re-run"
             }
         }
     }
@@ -592,17 +743,29 @@ class SyncCalibrator(
         /**
          * Undo a calibration run that a process death interrupted. If [journal] still holds
          * originals, the previous run never reached its finally, so restore each client's
-         * pre-run latency via [setLatency] and clear the journal. Call once at host startup
+         * pre-run latency via [setLatency] and volume via [setVolume], then clear the journal.
+         * Call once at host startup
          * (after the server control connection is up) BEFORE any new run. Safe to call when
          * no journal exists (returns empty). Returns the restored client ids.
          */
         suspend fun recover(
             journal: CalibrationJournal,
             setLatency: suspend (clientId: String, latencyMs: Int) -> Unit,
+            setVolume: suspend (clientId: String, muted: Boolean, percent: Int) -> Unit,
         ): List<String> {
             val pending = journal.load() ?: return emptyList()
-            Log.w(TAG, "recovering ${pending.size} client latency(ies) from an interrupted run: ${pending.keys}")
-            pending.forEach { (id, latency) -> setLatency(id, latency) }
+            Log.w(TAG, "recovering ${pending.size} client(s) from an interrupted run: ${pending.keys}")
+            // Blind restore of pre-run state (latency AND volume/mute) — NOT compare-and-restore:
+            // the likeliest crash state is a transient probe value (latency − probe, and possibly
+            // a muted "other" from a pair round) that matches no durable record, so a
+            // restore-only-if-unchanged guard would strand exactly that state. The only cost is
+            // reverting a deliberate human tweak made in the crash→next-start window: visible,
+            // one-off, human-recoverable (see ADVISOR-volume-calibration-REPLY-2.md). Restoring
+            // an offline client is fine — the server persists it and applies it on reconnect.
+            pending.forEach { (id, s) ->
+                setLatency(id, s.latencyMs)
+                setVolume(id, s.volumeMuted, s.volumePercent)
+            }
             journal.clear()
             return pending.keys.toList()
         }
@@ -632,6 +795,37 @@ class SyncCalibrator(
         val PROBE_SET_MS = listOf(60, 90, 210, 390)
 
         private const val WEB_CLIENT_PREFIX = "qcweb-"
+
+
+        /** Floor the no-mute batch lifts a too-quiet client to before measuring. A FLOOR, not the
+         *  cap: the batch runs while people are listening, so it must not shout — it only raises
+         *  speakers already below this and leaves the rest untouched. PLACEHOLDER pending a rig
+         *  characterization of z against volume at a realistic distance; the one sweep so far
+         *  crossed the z=9 attribution floor near 10-12% on a mid-room speaker, so this carries
+         *  margin without going loud. */
+        private const val BOOST_FLOOR_PERCENT = 50
+
+        /** Coarse boost ramp, tried in order, and deliberately NOT starting at the cap.
+         *
+         *  Rig-measured (one speaker alone, only its device volume varied, counting peaks over the
+         *  z=9 floor): 25% → 0 peaks, 50% → 4 peaks (direct path z=13), 75% → 9 peaks. Level lifts a
+         *  speaker's ROOM REFLECTIONS over the floor along with its direct path, and those ghosts
+         *  cluster within ~50 ms while the probe offsets are only 30 ms apart — so past the point of
+         *  being detectable, louder actively degrades attribution as well as disturbing the room.
+         *  Hence: reach the floor first, escalate only if the speaker was not found at all.
+         *
+         *  Not an estimator — near the floor a single capture is far too noisy to invert (the same
+         *  speaker read z=13 and z=9 on adjacent captures), so these are fixed coarse levels. */
+        private val BOOST_RAMP_PERCENT = listOf(60, 100)
+
+        /** Lease handed to a boosted client. Sized off the round it must cover, not a round number:
+         *  a pair round is 4 measurements × [CAPTURE_MS] plus four [SETTLE_MS] ≈ 76 s nominal, and
+         *  each measurement may retry once (+[RETRY_BACKOFF_MS] +[CAPTURE_MS]) for ≈156 s worst
+         *  case. The rounds most likely to retry are the marginal quiet-target ones — exactly the
+         *  rounds the boost exists for — so a lease that only covered the nominal case would lapse
+         *  precisely when it matters. Renewals are kept rare (each re-serializes the host's
+         *  metadata, art blob included), hence one generous lease rather than a ticker. */
+        private const val OS_BOOST_LEASE_MS = 180_000L
 
         /** Corrections below this are within measurement noise AND ~the audible-sync
          *  floor: leave the client where it is rather than chase noise. */

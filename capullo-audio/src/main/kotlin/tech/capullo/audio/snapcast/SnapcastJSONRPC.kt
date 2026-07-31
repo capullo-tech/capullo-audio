@@ -207,6 +207,18 @@ data class StreamMetadata(
     @SerialName("appleMusicUrl") val appleMusicUrl: String? = null,
     val tags: String? = null,
     val uuid: String? = null,
+    /**
+     * Calibration detectability-boost LEASE, `"<clientId>:<osPercent>:<expiryEpochMs>"`, rides the
+     * metadata channel because that is the one server→all-clients broadcast QuantumCast already has
+     * (`SnapcontrolMetadataMapper` copies `NowPlaying.extras` verbatim, and snapserver rebroadcasts
+     * the properties to every control connection). Each client self-filters by id and ignores a
+     * lease addressed elsewhere; a client with no OS volume to give (web) ignores it entirely.
+     *
+     * Leased rather than latched so a server that dies mid-run cannot strand a phone loud: the
+     * boost expires on its own. See `SPEC-os-volume-boost.md` and
+     * [tech.capullo.audio.calibration.OsVolumeBoost].
+     */
+    @SerialName("calBoost") val calBoost: String? = null,
 )
 
 fun StreamMetadata.firstArtist(): String = when (val a = artist) {
