@@ -51,7 +51,9 @@ class OrchestrationTest {
         val intrinsic: Map<String, Double>,
         val z: Map<String, Double>,
         val dropOnMeasureCall: Pair<String, Int>? = null,
-        /** Return null (a dead capture) on this 1-based measure() call, to force a round to fail. */
+        /** Return null (a dead capture) for every measure() call up to and including this 1-based
+         *  index, to force a round to fail. Must cover ALL the baseline captures of a round, since
+         *  one surviving baseline is enough for the round to proceed. */
         val nullOnMeasureCall: Int? = null,
     ) : Measurer {
         var measureCalls = 0
@@ -59,8 +61,11 @@ class OrchestrationTest {
             if (dropOnMeasureCall?.first == id && dropOnMeasureCall.second == callNo) null
             else Dsp.Peak(base - (control.latency[id] ?: 0), z.getValue(id))
         }
-        override suspend fun measure(peakCount: Int): List<Dsp.Peak>? =
-            if (++measureCalls == nullOnMeasureCall) null else peaks(measureCalls)
+        override suspend fun measure(peakCount: Int): List<Dsp.Peak>? {
+            measureCalls++
+            val dead = nullOnMeasureCall != null && measureCalls <= nullOnMeasureCall
+            return if (dead) null else peaks(measureCalls)
+        }
         override suspend fun measureHalves(peakCount: Int): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>> {
             val p = peaks(-1) // probe measurement; not counted against dropOnMeasureCall
             return Triple(p, p, p)
@@ -212,7 +217,7 @@ class OrchestrationTest {
             control,
             intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
             z = mapOf("ref" to 40.0, "t" to 20.0),
-            nullOnMeasureCall = 1, // first baseline is a dead capture
+            nullOnMeasureCall = 3, // all three baseline captures dead -> the round fails
         )
         val cal = SyncCalibrator(
             tapArm = {}, control = control,
@@ -268,7 +273,7 @@ class OrchestrationTest {
             control,
             intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
             z = mapOf("ref" to 40.0, "t" to 20.0),
-            nullOnMeasureCall = 1, // fail once so the boosted retry runs
+            nullOnMeasureCall = 3, // kill every baseline so the boosted retry runs
         )
         val osCalls = mutableListOf<Pair<Map<String, Int>, Long>>()
         val cal = SyncCalibrator(
@@ -300,7 +305,7 @@ class OrchestrationTest {
             control,
             intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
             z = mapOf("ref" to 40.0, "t" to 20.0),
-            nullOnMeasureCall = 1, // fail once so a boost is attempted at all
+            nullOnMeasureCall = 3, // kill every baseline so a boost is attempted at all
         )
         val osCalls = mutableListOf<Pair<Map<String, Int>, Long>>()
         val cal = SyncCalibrator(
@@ -321,6 +326,67 @@ class OrchestrationTest {
             "target's device volume left alone",
             osCalls.none { it.first.containsKey("t") },
         )
+    }
+
+    @Test
+    fun `a muted target is skipped up front, not probed for minutes then failed`() = runTest {
+        // A muted speaker emits nothing, so it can never be attributed, and we must not unmute it.
+        // Left in the run it burns a full pair round plus both boost escalations before reporting a
+        // misleading "target peak did not move by the probe".
+        val control = FakeControl(mapOf("ref" to 0, "a" to 0, "m" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "a" to 1150.0),
+            z = mapOf("ref" to 40.0, "a" to 25.0),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("a", "a", 0, 100, false),
+                SyncCalibrator.CalClient("m", "muted-one", 0, 100, true),
+            ),
+        )
+        val state = cal.state.value
+        assertTrue("state=$state", state is SyncCalibrator.State.Done)
+        assertTrue(
+            "the summary must say it was skipped for being muted",
+            (state as SyncCalibrator.State.Done).summary.contains("skipped (muted): muted-one"),
+        )
+        assertEquals("a muted client's latency is never touched", 0, control.latency["m"])
+        assertTrue("and its volume is never touched", control.volumeCalls.none { it.first == "m" })
+    }
+
+    @Test
+    fun `a muted reference fails fast with an actionable reason`() = runTest {
+        // Everything is measured against the reference, so if it is silent nothing can work.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        val ok = cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, true), // muted reference
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        assertTrue(!ok)
+        val state = cal.state.value
+        assertTrue("state=$state", state is SyncCalibrator.State.Failed)
+        assertTrue(
+            "must name the reference and say to unmute it",
+            (state as SyncCalibrator.State.Failed).reason.contains("reference speaker ref is muted"),
+        )
+        assertEquals("nothing measured", 0, measurer.measureCalls)
     }
 
     @Test

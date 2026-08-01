@@ -90,6 +90,11 @@ class SyncCalibrator(
      *  once at the end of [calibrate] so no path's write can silently fail. */
     private val intended = LinkedHashMap<String, Int>()
 
+    /** Appended to the run summary so muted speakers are reported as deliberately skipped rather
+     *  than silently absent. Set once per run by [calibrate]. */
+    private var mutedNote: String = ""
+
+
     /** A FINAL latency write (commit or restore) — records it for run-level read-back.
      *  Transient probe writes use [control].sendSetLatency directly and are not recorded. */
     private suspend fun commitLatency(id: String, latencyMs: Int) {
@@ -102,9 +107,33 @@ class SyncCalibrator(
      * entry = reference whose latency is never changed). Returns true if every target
      * ended calibrated (or already aligned).
      */
-    suspend fun calibrate(clients: List<CalClient>): Boolean {
+    suspend fun calibrate(allClients: List<CalClient>): Boolean {
+        if (allClients.size < 2) {
+            _state.value = State.Failed("need at least 2 connected clients, got ${allClients.size}")
+            return false
+        }
+        // EXCLUDE MUTED CLIENTS UP FRONT. A muted speaker emits nothing, so the mic cannot find it
+        // and we must not unmute it (a mute is explicit user intent). Left in the list it is probed
+        // anyway, fails attribution, and burns a full pair round plus both boost escalations —
+        // minutes — before reporting "target peak did not move by the probe", which reads as a
+        // probe fault rather than the real reason. Skip it and say so.
+        val reference = allClients.first()
+        if (reference.muted) {
+            _state.value = State.Failed(
+                "the reference speaker ${reference.name} is muted — everything is measured against " +
+                    "it, so unmute it and re-run",
+            )
+            return false
+        }
+        val muted = allClients.drop(1).filter { it.muted }
+        val clients = listOf(reference) + allClients.drop(1).filterNot { it.muted }
+        mutedNote = if (muted.isEmpty()) "" else {
+            "; skipped (muted): " + muted.joinToString { it.name }
+        }
         if (clients.size < 2) {
-            _state.value = State.Failed("need at least 2 connected clients, got ${clients.size}")
+            _state.value = State.Failed(
+                "no unmuted speaker to calibrate against ${reference.name}${mutedNote}",
+            )
             return false
         }
         intended.clear()
@@ -284,8 +313,19 @@ class SyncCalibrator(
         reference: CalClient,
         target: CalClient,
     ): String? {
+        // REPEAT THE BASELINE, not just the probe. Rig-measured: five identical baseline captures
+        // put the two speakers' peak SPACING — which is exactly what the delta is made of — at
+        // 37.6/41.0/45.8/54.3/71.5 ms, a 34 ms wander with nothing changed. That single number
+        // explains the run-to-run correction spread chased all day, and it explains why three probe
+        // captures inside one run agreed to 1 ms: they were all compared against ONE baseline and
+        // inherited the same error. The noise is drawn once per run, before probing starts.
         progress("measuring baseline (${reference.name} vs ${target.name})…")
-        val baseline = measurer.measure(4) ?: return failPair(target, "baseline measurement failed")
+        val baselines = mutableListOf<List<Dsp.Peak>>()
+        repeat(PROBE_REPEATS) { attempt ->
+            measurer.measure(4)?.let { baselines += it }
+            if (attempt < PROBE_REPEATS - 1) progress("baseline capture ${attempt + 2}/$PROBE_REPEATS…")
+        }
+        if (baselines.isEmpty()) return failPair(target, "baseline measurement failed")
 
         // Probe BOTH the reference and the target, each by its own offset, and identify
         // both by DISPLACEMENT — same common-mode fix as the batch path. Electing the
@@ -297,29 +337,70 @@ class SyncCalibrator(
         control.sendSetLatency(reference.id, reference.latencyMs - refOff)
         control.sendSetLatency(target.id, target.latencyMs - tgtOff)
         delay(SETTLE_MS)
-        val probed = measurer.measure(4) ?: run {
-            commitLatency(reference.id, reference.latencyMs)
-            return failPair(target, "probe measurement failed")
+        // MEASURE REPEATEDLY AND TAKE THE MEDIAN. One 12 s capture resolves this residual to only
+        // about ±20 ms — established on-rig by elimination: program material, level/boost,
+        // cross-speaker probe confusion, within-cluster reflections and per-BT-session drift were
+        // each ruled out by controlled tests, yet three back-to-back runs of an unchanged rig still
+        // spanned 36 ms. The error is intrinsic to a single capture, so the remedy is statistical.
+        // MEDIAN rather than mean: the observed outliers are wild (a −104 ms against a −65 ms run),
+        // and a mean is dragged by them while a median ignores them outright. The probes stay
+        // applied across the repeats, so this costs captures, not settle time.
+        // Every baseline is paired with every probe capture, so N captures each yield up to N*N
+        // independent deltas — the baseline error that dominates is sampled repeatedly instead of
+        // being fixed for the whole run.
+        val samples = mutableListOf<Int>()
+        var lastAttr: PeakAttribution.Result? = null
+        var refNotFound = false
+        repeat(PROBE_REPEATS) { attempt ->
+            val probed = measurer.measure(4)
+            if (probed != null) {
+                for (base in baselines) {
+                    val a = PeakAttribution.attribute(base, probed, listOf(refOff, tgtOff), MATCH_TOL_MS)
+                    lastAttr = a
+                    val r = a.matches[0]
+                    val t = a.matches[1]
+                    if (r == null) refNotFound = true
+                    if (r != null && t != null) {
+                        samples += ((t.probedLagMs - tgtOff) - (r.probedLagMs - refOff)).roundToInt()
+                    }
+                }
+            }
+            if (attempt < PROBE_REPEATS - 1) progress("probe capture ${attempt + 2}/$PROBE_REPEATS…")
         }
-        val attr = PeakAttribution.attribute(baseline, probed, listOf(refOff, tgtOff), MATCH_TOL_MS)
         commitLatency(reference.id, reference.latencyMs) // reference is never corrected
-        val refM = attr.matches[0]
-            ?: return failPair(
-                target,
-                "reference speaker ${reference.name} was not detected — it is probably too quiet or " +
-                    "too far from this phone; raise its volume and re-run " +
-                    "(timeline drift ${attr.driftMs.roundToInt()}ms)",
-            )
-        val tgtM = attr.matches[1] ?: return failPair(target, "target peak did not move by the probe")
-
-        val deltaMs = ((tgtM.probedLagMs - tgtOff) - (refM.probedLagMs - refOff)).roundToInt()
+        if (samples.isEmpty()) {
+            return if (refNotFound) {
+                failPair(
+                    target,
+                    "reference speaker ${reference.name} was not detected — it is probably too quiet " +
+                        "or too far from this phone; raise its volume and re-run " +
+                        "(timeline drift ${lastAttr?.driftMs?.roundToInt() ?: 0}ms)",
+                )
+            } else {
+                failPair(target, "target peak did not move by the probe")
+            }
+        }
+        val deltaMs = samples.sorted()[samples.size / 2]
+        Log.i(TAG, "${target.name}: probe samples=$samples median=${deltaMs}ms")
         val newLatency = target.latencyMs + deltaMs
         Log.i(
             TAG,
-            "pair ${reference.name}/${target.name}: ref@%.1f target@%.1f delta=${deltaMs}ms "
-                .format(refM.baselineLagMs, tgtM.baselineLagMs) +
+            "pair ${reference.name}/${target.name}: delta=${deltaMs}ms " +
                 "latency ${target.latencyMs} -> $newLatency",
         )
+        // DAMPING: distrust a correction that contradicts this sink's own recent history by more
+        // than the measurement can resolve. A single run is one noisy sample, so without this the
+        // system confidently applies a value its next run disagrees with; deferring costs nothing
+        // (the next run decides) while applying a bad one moves a speaker audibly out of sync.
+        val recent = history?.recent(target.id, DAMPING_HISTORY) ?: emptyList()
+        if (recent.size >= DAMPING_MIN_SAMPLES) {
+            val prior = recent.sorted()[recent.size / 2]
+            if (abs(deltaMs - prior) > DAMPING_TOL_MS) {
+                commitLatency(target.id, target.latencyMs)
+                return "${target.name}: Δ${deltaMs}ms disagrees with recent history (~${prior}ms) — " +
+                    "deferred, re-run to confirm"
+            }
+        }
         if (abs(deltaMs) <= DEADBAND_MS) {
             // Already aligned within tolerance (same deadband as the batch). Skip the
             // verify: with the two speakers coincident their re-probed peaks overlap and
@@ -730,8 +811,9 @@ class SyncCalibrator(
     }
 
     private fun finish(success: Boolean, summary: String) {
-        Log.i(TAG, "${if (success) "done" else "failed"}: $summary")
-        _state.value = if (success) State.Done(summary) else State.Failed(summary)
+        val full = summary + mutedNote
+        Log.i(TAG, "${if (success) "done" else "failed"}: $full")
+        _state.value = if (success) State.Done(full) else State.Failed(full)
     }
 
     /** Outcome of gating one computed correction. */
@@ -838,9 +920,27 @@ class SyncCalibrator(
          *  metadata, art blob included), hence one generous lease rather than a ticker. */
         private const val OS_BOOST_LEASE_MS = 180_000L
 
-        /** Corrections below this are within measurement noise AND ~the audible-sync
-         *  floor: leave the client where it is rather than chase noise. */
-        private const val DEADBAND_MS = 15
+        /** Number of probe captures whose deltas are reduced to a median. Three trades ~24 s of
+         *  extra capture for roughly halving the error and, more importantly, discarding the
+         *  occasional wild sample outright. */
+        private const val PROBE_REPEATS = 3
+
+        /** Corrections below this are within measurement noise AND ~the audible-sync floor: leave
+         *  the client where it is rather than chase noise. Raised from 15 ms once the rig showed a
+         *  single capture resolves the residual to only ~±20 ms — at 15 ms the SAME unchanged setup
+         *  reported "trim -60ms" and "already aligned" on consecutive runs, which are one
+         *  measurement drawn twice. Sized at ~2x the post-median noise. */
+        private const val DEADBAND_MS = 25
+
+        /** How many past corrections the damping check considers, and the minimum it needs before
+         *  it will veto anything (one prior value is not a history). */
+        private const val DAMPING_HISTORY = 5
+        private const val DAMPING_MIN_SAMPLES = 2
+
+        /** A new delta further than this from the sink's recent median is treated as a bad sample
+         *  and deferred. Wide enough to let a genuine change through after two consistent runs,
+         *  tight enough to reject the ±40 ms outliers seen on-rig. */
+        private const val DAMPING_TOL_MS = 45
         /** A residual larger than any real BT/web sink gap; a computed delta beyond it
          *  means the target was matched to a ghost. Kept well above legitimate cold-start
          *  corrections (iPhone web needed ~+217). */
