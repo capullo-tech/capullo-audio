@@ -206,7 +206,14 @@ class OrchestrationTest {
                 SyncCalibrator.CalClient("t", "t", 0, 50, false),
             ),
         )
-        assertTrue("no volume was touched", control.volumeCalls.isEmpty())
+        // No BOOST. The end-of-run balance may still write volumes (that is its job, and this scene
+        // is genuinely lopsided at z 40 vs 20) — what must not happen is a client being shouted up
+        // mid-run for detectability it did not need. A boost is identifiable as a write to one of
+        // the ramp levels while the run is still measuring.
+        assertTrue(
+            "no detectability boost was applied, got ${control.volumeCalls}",
+            control.volumeCalls.none { it == Triple("t", false, 60) || it == Triple("t", false, 75) },
+        )
     }
 
     @Test
@@ -232,7 +239,7 @@ class OrchestrationTest {
         // The ramp's FIRST level, not the cap: past the detection floor, extra level lifts room
         // reflections over the floor too and degrades attribution (rig-measured).
         assertTrue("retry boosted to the ramp's first level", control.volumeCalls.contains(Triple("t", false, 60)))
-        assertTrue("must not jump straight to the cap", control.volumeCalls.none { it == Triple("t", false, 100) })
+        assertTrue("must not jump straight to the ceiling", control.volumeCalls.none { it == Triple("t", false, 75) })
         assertEquals("last volume write restores the original", Triple("t", false, 50), control.volumeCalls.last())
     }
 
@@ -259,8 +266,19 @@ class OrchestrationTest {
             ),
         )
         assertTrue("quiet client raised to the floor", control.volumeCalls.contains(Triple("a", false, 50)))
-        assertTrue("a client at a sane level is left alone", control.volumeCalls.none { it.first == "b" })
-        assertEquals("pre-boost restored", Triple("a", false, 10), control.volumeCalls.last())
+        assertTrue(
+            "a client at a sane level is not pre-boosted",
+            control.volumeCalls.none { it == Triple("b", false, BATCH_BOOST_FLOOR) },
+        )
+        // The pre-boost is restored. It is the LAST boost-related write, but not necessarily the
+        // last write of the run: the end-of-run balance may then set persistent volumes, and a
+        // pre-boosted client is excluded from that (its levels were measured boosted), so "a" must
+        // end exactly where the listener had it.
+        assertEquals(
+            "pre-boost restored and not overwritten by the balance",
+            Triple("a", false, 10),
+            control.volumeCalls.last { it.first == "a" },
+        )
     }
 
     @Test
@@ -410,5 +428,90 @@ class OrchestrationTest {
             ),
         )
         assertTrue("no volume write to a muted client", control.volumeCalls.none { it.first == "t" })
+    }
+
+    // ---- end-of-run volume balance --------------------------------------------------
+
+    @Test
+    fun `a lopsided room ends with the loud speaker attenuated and the quiet one on the cap`() = runTest {
+        // "a" arrives at the mic twice as strong as "b" at the same gain. The balance evens them AT
+        // THE MIC, which means pulling "a" down rather than pushing "b" up, and the loudest ends on
+        // the headroom cap so the user's global control still has somewhere to go.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        val refFinal = control.volumeCalls.last { it.first == "ref" }.third
+        val tFinal = control.volumeCalls.last { it.first == "t" }.third
+        assertEquals("the loudest lands on the headroom cap", VolumeBalance.HEADROOM_PERCENT, tFinal)
+        assertTrue("the speaker that measured louder is attenuated ($refFinal vs $tFinal)", refFinal < tFinal)
+        assertTrue("nothing is written at full scale", maxOf(refFinal, tFinal) <= VolumeBalance.HEADROOM_PERCENT)
+    }
+
+    @Test
+    fun `an already-even room has its volumes left alone`() = runTest {
+        // Same level at the mic: there is nothing to balance, so the listener's volumes stand.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 30.0, "t" to 30.0),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 70, false),
+                SyncCalibrator.CalClient("t", "t", 0, 70, false),
+            ),
+        )
+        assertTrue("no volume was written, got ${control.volumeCalls}", control.volumeCalls.isEmpty())
+    }
+
+    @Test
+    fun `a failed run still balances what it managed to measure`() = runTest {
+        // The correction failed to verify, so no latency changed — but the levels were measured all
+        // the same, and leaving a lopsided room lopsided because the SYNC half failed would waste
+        // them. The balance runs off the run's finally for exactly this reason.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            // Pair path measure() order: 3 baselines, 3 probes, verify baseline, verify probe.
+            // Killing the target in the verify PROBE fails the verify after the levels are in hand.
+            dropOnMeasureCall = "t" to 8,
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        assertEquals("the failed correction was restored", 0, control.latency["t"])
+        assertTrue("volumes were still balanced", control.volumeCalls.isNotEmpty())
+    }
+
+    private companion object {
+        /** Mirrors SyncCalibrator.BOOST_FLOOR_PERCENT (private there). */
+        const val BATCH_BOOST_FLOOR = 50
     }
 }

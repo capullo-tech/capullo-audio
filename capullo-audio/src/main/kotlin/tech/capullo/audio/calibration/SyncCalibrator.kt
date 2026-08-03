@@ -1,9 +1,11 @@
 package tech.capullo.audio.calibration
 
 import android.util.Log
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -94,6 +96,21 @@ class SyncCalibrator(
      *  than silently absent. Set once per run by [calibrate]. */
     private var mutedNote: String = ""
 
+    /** Per-client loudness AT THE MIC, one entry per capture, reduced at the end of the run into the
+     *  levels [VolumeBalance] balances on.
+     *
+     *  Kept PER CAPTURE rather than as a flat list per client, because a capture's absolute salience
+     *  is not trustworthy but the ratio between two clients WITHIN one capture is: z divides the
+     *  correlation peak by that capture's own noise floor, so the floor cancels out of a ratio taken
+     *  inside a capture and does not cancel out of one taken across captures. Rig-measured, the
+     *  across-capture part is the larger effect by far — the same unchanged pair read top-z 22.6,
+     *  13.8 and 11.6 on three consecutive captures — so each capture is normalised on its own before
+     *  anything is compared, which removes that swing as common mode.
+     *
+     *  Only UNBOOSTED captures are recorded. A boosted client is acoustically louder while the SW
+     *  gain the balance reasons about is unchanged — worse for the OS-volume boost, which the server
+     *  cannot see at all — so it would read as a genuinely loud speaker and get attenuated for it. */
+    private val levelCaptures = mutableListOf<Map<String, Double>>()
 
 
     /** A FINAL latency write (commit or restore) — records it for run-level read-back.
@@ -138,6 +155,7 @@ class SyncCalibrator(
             return false
         }
         intended.clear()
+        levelCaptures.clear()
         val ring = ReferencePcmRing()
         val measurer = measurerFactory?.invoke(ring) ?: micMeasurer(ring)
         // Journal every client's pre-run latency AND volume BEFORE the first mutating write, so
@@ -165,6 +183,12 @@ class SyncCalibrator(
             }
         } finally {
             tapArm(null)
+            // Balance the volumes LAST, and here rather than inside a strategy: this is the one
+            // point where every transient write the run made — the muted others, the detectability
+            // boosts — has already been restored by its own finally, so the levels being acted on
+            // and the gains being written both describe the room the listener is left with. It runs
+            // before the journal is cleared so a process death mid-balance is still recoverable.
+            balanceVolumes(clients)
             journal?.clear()
             // Run-level read-back: retry the final write of EVERY mutated client (batch,
             // pair, and every restore) and fail any that stay wrong. A silent failed
@@ -296,7 +320,9 @@ class SyncCalibrator(
                 publishOsBoost?.invoke(osTargets, OS_BOOST_LEASE_MS)
             }
             if (others.isNotEmpty() || swBoost || refSwBoost || osTargets.isNotEmpty()) delay(SETTLE_MS)
-            return calibratePair(measurer, reference, target)
+            // Levels are only usable for balancing when nothing has been boosted: a boosted speaker
+            // is louder than its SW gain says, so the balance would read it as needing attenuation.
+            return calibratePair(measurer, reference, target, harvestLevels = !boost)
         } finally {
             others.forEach { control.sendSetVolume(it.id, muted = it.muted, percent = it.volumePercent) }
             if (swBoost) control.sendSetVolume(target.id, muted = target.muted, percent = target.volumePercent)
@@ -313,6 +339,7 @@ class SyncCalibrator(
         measurer: Measurer,
         reference: CalClient,
         target: CalClient,
+        harvestLevels: Boolean = false,
     ): String? {
         // REPEAT THE BASELINE, not just the probe. Rig-measured: five identical baseline captures
         // put the two speakers' peak SPACING — which is exactly what the delta is made of — at
@@ -361,6 +388,10 @@ class SyncCalibrator(
         var refNotFound = false
         repeat(PROBE_REPEATS) { attempt ->
             val probed = measurer.measure(4)
+            // One level sample per CAPTURE, not per baseline pairing: the N pairings of one probed
+            // capture all read the same two peaks, so counting them N times would just weight that
+            // capture N-fold in the median.
+            var levelled = false
             if (probed != null) {
                 for (base in baselines) {
                     val a = PeakAttribution.attribute(base, probed, listOf(refOff, tgtOff), MATCH_TOL_MS)
@@ -372,6 +403,10 @@ class SyncCalibrator(
                         val delta = ((t.probedLagMs - tgtOff) - (r.probedLagMs - refOff)).roundToInt()
                         val baseZ = base.maxOfOrNull { it.z } ?: 0.0
                         samples += delta to minOf(baseZ, r.z, t.z)
+                        if (harvestLevels && !levelled) {
+                            levelled = true
+                            levelCaptures += mapOf(reference.id to r.z, target.id to t.z)
+                        }
                     }
                 }
             }
@@ -546,6 +581,23 @@ class SyncCalibrator(
                         } +
                         " ghosts=${attr.ghostLagsMs.map { "%.0f".format(it) }}",
                 )
+                // Harvest levels for the balance. Two samples per client from two DIFFERENT captures
+                // (the probed peak and the baseline leader it was matched to), because one capture
+                // is too noisy to distinguish a real imbalance from measurement scatter. Clients the
+                // detectability pre-boost touched are excluded: their gain no longer describes their
+                // loudness.
+                val boosted = preBoost.map { it.id }.toSet()
+                val probedLevels = mutableMapOf<String, Double>()
+                val baselineLevels = mutableMapOf<String, Double>()
+                for (i in -1 until sim.size) {
+                    val client = if (i < 0) reference else sim[i]
+                    val m = attr.matches[i + 1] ?: continue
+                    if (client.id in boosted) continue
+                    probedLevels[client.id] = m.z
+                    zAt(baseline, m.baselineLagMs)?.let { baselineLevels[client.id] = it }
+                }
+                if (probedLevels.size >= 2) levelCaptures += probedLevels
+                if (baselineLevels.size >= 2) levelCaptures += baselineLevels
                 if (refMatch == null) {
                     // Reference could not be identified by its displacement → whole batch
                     // untrusted. Remove target probes and degrade them to v1 pair rounds
@@ -671,14 +723,14 @@ class SyncCalibrator(
             // their story. Bounded: fires only on failure, one extra round each, and nothing is
             // muted for it (the boost alone is the lever).
             for (target in webRetry) {
-                progress("re-measuring ${target.name} at full volume…")
+                progress("re-measuring ${target.name} at the boost ceiling…")
                 val outcome = mutedPairRound(
                     measurer, reference, target, others = emptyList(),
                     boostPercent = BOOST_RAMP_PERCENT.last(),
                 )
                 if (outcome != null) succeeded += target.id
                 outcomes[target.id] = outcome
-                    ?: "${target.name}: too quiet to measure even at full volume — " +
+                    ?: "${target.name}: too quiet to measure even at the boost ceiling — " +
                     "move it closer or raise its device volume, then re-run"
             }
             overflow.filter { isWebClient(it) }.forEach {
@@ -748,7 +800,7 @@ class SyncCalibrator(
             } else {
                 // Already at full SW gain (or muted): nothing left to give. Say so in terms the
                 // listener can act on rather than reporting an opaque skip.
-                outcomes[client.id] = "${client.name}: too quiet to measure at full volume — " +
+                outcomes[client.id] = "${client.name}: too quiet to measure at the boost ceiling — " +
                     "move it closer or raise its device volume, then re-run"
             }
         }
@@ -828,6 +880,115 @@ class SyncCalibrator(
         val full = summary + mutedNote
         Log.i(TAG, "${if (success) "done" else "failed"}: $full")
         _state.value = if (success) State.Done(full) else State.Failed(full)
+    }
+
+    // ---- volume balance ------------------------------------------------------------
+
+    /** Salience of the peak sitting at [lagMs] in [peaks], or null if none is that close. Used to
+     *  read a second, independent level sample out of the baseline capture. */
+    private fun zAt(peaks: List<Dsp.Peak>, lagMs: Double, tolMs: Double = PeakAttribution.CLUSTER_MS) =
+        peaks.filter { abs(it.lagMs - lagMs) <= tolMs }.maxOfOrNull { it.z }
+
+    /**
+     * Even the speakers out AT THE MIC, so the stereo image centres where the recording device sits
+     * (see [VolumeBalance] for why that, and not equal numbers, is the goal).
+     *
+     * PERSISTENT, unlike the detectability boost: this is the volume the listener is left with, so
+     * it is written once at the end of a run and never restored. Deliberately conservative — it acts
+     * only on clients measured at least [MIN_LEVEL_SAMPLES] times in unboosted captures, only when
+     * they are actually uneven, and only when the resulting move is big enough to be worth writing.
+     * A run that measured nothing usable changes no volumes at all.
+     */
+    private suspend fun balanceVolumes(clients: List<CalClient>) {
+        val byId = clients.associateBy { it.id }
+        val name = { id: String -> byId[id]?.name ?: id }
+        // Log the RAW per-capture ratios, not just the reduced answer. Whether this feature is
+        // viable at all turns on how much of the between-client level difference is real and how
+        // much is capture noise, and only the spread of these lines can say: run 1's three
+        // unchanged baselines had between-leader ratios of 1.40/1.17/1.00 against a decision
+        // threshold of BALANCE_TOL_RATIO=1.25, i.e. the scatter alone straddles the decision. A
+        // logged median with no spread behind it is a number nobody can act on.
+        levelCaptures.forEachIndexed { i, capture ->
+            val loudest = capture.values.maxOrNull() ?: return@forEachIndexed
+            Log.i(
+                TAG,
+                "balance: capture $i " + capture.entries.joinToString {
+                    "${name(it.key)}=%.2f(z=%.1f)".format(if (loudest > 0) it.value / loudest else 0.0, it.value)
+                },
+            )
+        }
+        val levels = reduceLevels()
+        val measured = clients.filterNot { it.muted }.mapNotNull { c ->
+            VolumeBalance.Client(c.id, c.volumePercent, levels[c.id] ?: return@mapNotNull null)
+        }
+        if (measured.size < 2) {
+            Log.i(
+                TAG,
+                "balance: skipped — only ${measured.size} client(s) measured at least " +
+                    "$MIN_LEVEL_SAMPLES time(s) unboosted (${levelCaptures.size} usable capture(s))",
+            )
+            return
+        }
+        val describe = { m: VolumeBalance.Client -> "${name(m.id)}=${"%.2f".format(m.measuredLevel)}" }
+        if (VolumeBalance.isBalanced(measured)) {
+            Log.i(TAG, "balance: already even at the mic (${measured.joinToString { describe(it) }})")
+            return
+        }
+        val gains = VolumeBalance.computeGains(measured)
+        if (gains == null) {
+            Log.i(TAG, "balance: nothing to act on (${measured.joinToString { describe(it) }})")
+            return
+        }
+        val current = measured.associate { it.id to it.gainPercent }
+        if (!VolumeBalance.isWorthApplying(current, gains)) {
+            Log.i(TAG, "balance: correction too small to write ($current -> $gains)")
+            return
+        }
+        Log.i(TAG, "balance: levels ${measured.joinToString { describe(it) }} volumes $current -> $gains")
+        // NonCancellable: these writes are PERSISTENT and the room is left in whatever state they
+        // reach. Cancelling the run (the host cancels the job on stop) between two of them would
+        // suspend-throw partway through and strand a half-balanced set of volumes — worse than
+        // either balancing or not. The full set is small and local, so completing it always is
+        // cheap. Every other write in this class is either transient or restored by a finally.
+        withContext(NonCancellable) {
+            gains.forEach { (id, percent) -> control.sendSetVolume(id, muted = false, percent = percent) }
+        }
+        val note = "; balanced volumes: " + gains.entries.joinToString { (id, g) -> "${name(id)} $g%" }
+        when (val s = _state.value) {
+            is State.Done -> _state.value = State.Done(s.summary + note)
+            is State.Failed -> _state.value = State.Failed(s.reason + note)
+            else -> Unit
+        }
+    }
+
+    /**
+     * Reduce [levelCaptures] to one level per client: normalise each capture against its own
+     * loudest client, then take the median across captures. Clients seen in fewer than
+     * [MIN_LEVEL_SAMPLES] captures are dropped — one reading scatters by more than the imbalance
+     * being looked for, so it is not evidence of anything.
+     *
+     * The normalisation is what makes the medians comparable at all. Absolute salience swings
+     * capture to capture for reasons that have nothing to do with any speaker's volume (mic AGC,
+     * program material, how autocorrelated the last 12 s happened to be), and that swing is common
+     * to every client in the capture. Dividing it out first leaves only the part that differs
+     * between speakers, which is the part the balance is supposed to act on.
+     */
+    internal fun reduceLevels(): Map<String, Double> {
+        val normalised = LinkedHashMap<String, MutableList<Double>>()
+        for (capture in levelCaptures) {
+            val loudest = capture.values.maxOrNull() ?: continue
+            if (loudest <= 0.0 || capture.size < 2) continue
+            capture.forEach { (id, z) -> normalised.getOrPut(id) { mutableListOf() } += z / loudest }
+        }
+        return normalised
+            .filterValues { it.size >= MIN_LEVEL_SAMPLES }
+            .mapValues { (_, v) -> median(v) }
+    }
+
+    /** Middle value of [values] (mean of the two middle ones when there is an even number). */
+    private fun median(values: List<Double>): Double {
+        val s = values.sorted()
+        return if (s.size % 2 == 1) s[s.size / 2] else (s[s.size / 2 - 1] + s[s.size / 2]) / 2.0
     }
 
     /** Outcome of gating one computed correction. */
@@ -931,18 +1092,26 @@ class SyncCalibrator(
          *  margin without going loud. */
         private const val BOOST_FLOOR_PERCENT = 50
 
-        /** Coarse boost ramp, tried in order, and deliberately NOT starting at the cap.
+        /** Coarse boost ramp, tried in order. It stops WELL SHORT OF FULL VOLUME, and that ceiling
+         *  is a hard requirement rather than a tuning choice.
          *
          *  Rig-measured (one speaker alone, only its device volume varied, counting peaks over the
          *  z=9 floor): 25% → 0 peaks, 50% → 4 peaks (direct path z=13), 75% → 9 peaks. Level lifts a
          *  speaker's ROOM REFLECTIONS over the floor along with its direct path, and those ghosts
          *  cluster within ~50 ms while the probe offsets are only 30 ms apart — so past the point of
-         *  being detectable, louder actively degrades attribution as well as disturbing the room.
-         *  Hence: reach the floor first, escalate only if the speaker was not found at all.
+         *  being detectable, louder actively degrades attribution.
+         *
+         *  The old ramp ended at 100. It was removed on 2026-08-01 for three converging reasons: the
+         *  owner's standing rule is the MINIMUM level that measures, not the maximum available; a
+         *  calibration that shouts is one people switch off, which costs far more accuracy than any
+         *  extra z buys; and full scale is the one operating point where limiter/compressor
+         *  nonlinearity plausibly distorts the correlation the whole method rests on. A speaker that
+         *  cannot be found at 75% is reported as too quiet and the listener is told to move it or
+         *  raise its device volume — a decision they can make, unlike an automatic blast.
          *
          *  Not an estimator — near the floor a single capture is far too noisy to invert (the same
          *  speaker read z=13 and z=9 on adjacent captures), so these are fixed coarse levels. */
-        private val BOOST_RAMP_PERCENT = listOf(60, 100)
+        private val BOOST_RAMP_PERCENT = listOf(60, 75)
 
         /** Lease handed to a boosted client. Sized off the round it must cover, not a round number:
          *  a pair round is 4 measurements × [CAPTURE_MS] plus four [SETTLE_MS] ≈ 76 s nominal, and
@@ -993,5 +1162,9 @@ class SyncCalibrator(
         private const val MATCH_TOL_MS = 15.0
         private const val MIN_PEAK_Z = 9.0
 
+        /** Unboosted level readings a client needs before the balance will move its volume. The
+         *  proxy scatters by more than the imbalance it is looking for on a single capture, so one
+         *  reading is not evidence of anything. */
+        private const val MIN_LEVEL_SAMPLES = 2
     }
 }
