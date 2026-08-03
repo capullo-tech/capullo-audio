@@ -302,4 +302,44 @@ class PeakAttributionTest {
         assertEquals("the two peaks are one cluster", 1, leaders.size)
         assertEquals(1000.0, leaders[0].lagMs, 0.01)
     }
+
+    @Test
+    fun `a cluster that moves together beats a lone coincidence at the same offset`() {
+        // The rig failure this fixes: across five identical captures the peak LAGS were stable but
+        // WHICH peak won kept flipping, because a single peak sitting at the expected offset is
+        // indistinguishable from a real direct path when you only look at that one peak. A probe
+        // delays a source's ENTIRE pattern - direct path and every reflection - by the same amount,
+        // so the real match drags its neighbours along and a coincidence brings nothing.
+        val refOff = 90
+        val tgtOff = 180
+        val baseline = listOf(
+            Dsp.Peak(800.0, 30.0), // reference
+            Dsp.Peak(1000.0, 12.0), // target direct
+            Dsp.Peak(1030.0, 10.0), // its reflections - quieter, but they move WITH it
+            Dsp.Peak(1060.0, 9.0),
+            Dsp.Peak(1500.0, 25.0), // decoy: louder, alone, no pattern behind it
+        )
+        val probed = listOf(
+            Dsp.Peak(890.0, 30.0),
+            Dsp.Peak(1180.0, 12.0),
+            Dsp.Peak(1210.0, 10.0),
+            Dsp.Peak(1240.0, 9.0),
+            Dsp.Peak(1680.0, 25.0), // decoy shifted by exactly the target offset
+        )
+        val r = PeakAttribution.attribute(baseline, probed, listOf(refOff, tgtOff), 15.0)
+        val target = r.matches[1]
+        assertNotNull("target must be attributed", target)
+        assertEquals("must take the corroborated cluster, not the louder lone peak", 1000.0, target!!.baselineLagMs, 0.01)
+        assertEquals(1180.0, target.probedLagMs, 0.01)
+    }
+
+    @Test
+    fun `patternSupport counts only arrivals that move by the same shift`() {
+        val baseline = listOf(Dsp.Peak(1000.0, 10.0), Dsp.Peak(1040.0, 9.0), Dsp.Peak(1400.0, 9.0))
+        // 1000 and 1040 both move by 180; 1400 is a different source and does not.
+        val probed = listOf(Dsp.Peak(1180.0, 10.0), Dsp.Peak(1220.0, 9.0), Dsp.Peak(1400.0, 9.0))
+        assertEquals(2, PeakAttribution.patternSupport(baseline, probed, 1000.0, 180.0, 15.0))
+        // A shift nothing actually took has no support.
+        assertEquals(0, PeakAttribution.patternSupport(baseline, probed, 1000.0, 500.0, 15.0))
+    }
 }

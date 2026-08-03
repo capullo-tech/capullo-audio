@@ -22,6 +22,11 @@ object PeakAttribution {
     /** Peaks within this of a stronger peak collapse into its cluster. */
     const val CLUSTER_MS = 8.0
 
+    /** How far one source's arrivals spread: its direct path plus the room reflections of it.
+     *  Rig-measured at 50-80 ms indoors, so [patternSupport] looks this far around an anchor when
+     *  asking whether the surrounding pattern moved with the candidate. */
+    const val SOURCE_SPREAD_MS = 80.0
+
     /** A probe moves a speaker's cluster without changing its salience much, so a
      *  matched pair must have comparable z on both sides. Blocks correlation sidelobes
      *  (which CAN clear the salience threshold on strongly autocorrelated program
@@ -103,17 +108,25 @@ object PeakAttribution {
         // probed) pair whose shift, drift-removed, is within tol of its offset; strongest
         // probed leader first, then smallest error, each cluster used once.
         fun matchAt(drift: Double): Array<Attribution?> {
-            data class Cand(val k: Int, val pi: Int, val bi: Int, val err: Double)
+            data class Cand(val k: Int, val pi: Int, val bi: Int, val err: Double, val pattern: Int)
             val cands = mutableListOf<Cand>()
             for (k in probesMs.indices) for (pi in p.indices) for (bi in b.indices) {
                 val err = abs((p[pi].lagMs - b[bi].lagMs - drift) - probesMs[k])
-                if (err < matchTolMs && zComparable(p[pi], b[bi])) cands += Cand(k, pi, bi, err)
+                if (err < matchTolMs && zComparable(p[pi], b[bi])) {
+                    cands += Cand(k, pi, bi, err, patternSupport(b, p, b[bi].lagMs, probesMs[k] + drift, matchTolMs))
+                }
             }
-            // Rank by match quality, then by EARLIEST arrival, then salience. Errors within
-            // EARLIEST_TIE_MS are treated as equal so the direct path beats a reflection that
-            // matches just as well (see EARLIEST_TIE_MS) rather than losing to it on z.
+            // Rank by CLUSTER PATTERN SUPPORT first, then match quality, then earliest arrival,
+            // then salience. A probe shifts a source's whole cluster rigidly, so the right answer
+            // is the one where the surrounding pattern moved with it; a lone coincidence that
+            // happens to sit at the expected offset has no such support. This is the fix for the
+            // dominant error found on-rig: across five identical captures the peak LAGS were stable
+            // (the same bins recurred in 4-5 of 5) but WHICH peak won kept flipping, and the flips
+            // came from the weakest captures. Individual-peak matching had no way to tell a real
+            // direct path from a well-placed coincidence; the surrounding pattern does.
             cands.sortWith(
-                compareBy<Cand> { (it.err / EARLIEST_TIE_MS).toInt() }
+                compareByDescending<Cand> { it.pattern }
+                    .thenBy { (it.err / EARLIEST_TIE_MS).toInt() }
                     .thenBy { p[it.pi].lagMs }
                     .thenByDescending { p[it.pi].z },
             )
@@ -211,6 +224,28 @@ object PeakAttribution {
         val r = out[0]
         val t = out[1]
         return if (r != null && t != null) r to t else null
+    }
+
+    /**
+     * How much of the baseline pattern around [anchorLagMs] reappears in [probed], shifted by
+     * [shiftMs]. Counts the baseline peaks within [SOURCE_SPREAD_MS] of the anchor that have a
+     * probed counterpart at their own lag + shift.
+     *
+     * The physics: a latency probe delays one source's ENTIRE arrival pattern — direct path and
+     * every reflection of it — by exactly the same amount. So a genuine match drags its neighbours
+     * along, while a coincidence (a reflection of another source, or a music self-similarity ghost)
+     * that merely happens to sit at the expected offset brings nothing with it. Counting the
+     * corroborating peaks separates the two, which matching a single peak cannot do.
+     */
+    fun patternSupport(
+        baseline: List<Dsp.Peak>,
+        probed: List<Dsp.Peak>,
+        anchorLagMs: Double,
+        shiftMs: Double,
+        tolMs: Double,
+    ): Int = baseline.count { bb ->
+        abs(bb.lagMs - anchorLagMs) <= SOURCE_SPREAD_MS &&
+            probed.any { pp -> abs(pp.lagMs - (bb.lagMs + shiftMs)) <= tolMs }
     }
 
     /** The value around which the most of [values] cluster within [tolMs], returned as that
