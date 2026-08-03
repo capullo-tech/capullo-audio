@@ -95,6 +95,7 @@ class SyncCalibrator(
     private var mutedNote: String = ""
 
 
+
     /** A FINAL latency write (commit or restore) — records it for run-level read-back.
      *  Transient probe writes use [control].sendSetLatency directly and are not recorded. */
     private suspend fun commitLatency(id: String, latencyMs: Int) {
@@ -348,7 +349,14 @@ class SyncCalibrator(
         // Every baseline is paired with every probe capture, so N captures each yield up to N*N
         // independent deltas — the baseline error that dominates is sampled repeatedly instead of
         // being fixed for the whole run.
-        val samples = mutableListOf<Int>()
+        //
+        // Samples are WEIGHTED BY CAPTURE QUALITY, because quality demonstrably predicts accuracy:
+        // in the five-capture diagnostic the two baselines with the lowest salience (top z 11.8 and
+        // 9.9) produced the two worst spacings (71.5 and 37.6 ms) while the three strong ones
+        // (z 30.8/28.2/24.7) clustered at 41-54 ms. A sample is only as trustworthy as the weakest
+        // evidence behind it, so its weight is the smallest salience in its own chain: the baseline
+        // it came from, and the two peaks that were matched in the probed capture.
+        val samples = mutableListOf<Pair<Int, Double>>() // delta -> weight
         var lastAttr: PeakAttribution.Result? = null
         var refNotFound = false
         repeat(PROBE_REPEATS) { attempt ->
@@ -361,7 +369,9 @@ class SyncCalibrator(
                     val t = a.matches[1]
                     if (r == null) refNotFound = true
                     if (r != null && t != null) {
-                        samples += ((t.probedLagMs - tgtOff) - (r.probedLagMs - refOff)).roundToInt()
+                        val delta = ((t.probedLagMs - tgtOff) - (r.probedLagMs - refOff)).roundToInt()
+                        val baseZ = base.maxOfOrNull { it.z } ?: 0.0
+                        samples += delta to minOf(baseZ, r.z, t.z)
                     }
                 }
             }
@@ -380,8 +390,12 @@ class SyncCalibrator(
                 failPair(target, "target peak did not move by the probe")
             }
         }
-        val deltaMs = samples.sorted()[samples.size / 2]
-        Log.i(TAG, "${target.name}: probe samples=$samples median=${deltaMs}ms")
+        val deltaMs = weightedMedian(samples)
+        Log.i(
+            TAG,
+            "${target.name}: probe samples=${samples.map { it.first }} " +
+                "weights=${samples.map { "%.0f".format(it.second) }} weighted-median=${deltaMs}ms",
+        )
         val newLatency = target.latencyMs + deltaMs
         Log.i(
             TAG,
@@ -819,6 +833,25 @@ class SyncCalibrator(
     /** Outcome of gating one computed correction. */
     enum class Gate { APPLY, ALIGNED, DEFERRED, IMPLAUSIBLE }
 
+    /**
+     * Median of [samples] (value to weight) with each sample counted in proportion to its weight:
+     * sort by value and take the value where the running weight crosses half the total.
+     *
+     * Still a median, so a wild outlier is ignored outright rather than dragging the result the way
+     * a weighted mean would — but a confident measurement now outvotes a marginal one instead of
+     * counting the same. Degenerates to a plain median when the weights are equal.
+     */
+    internal fun weightedMedian(samples: List<Pair<Int, Double>>): Int {
+        val sorted = samples.sortedBy { it.first }
+        val half = sorted.sumOf { it.second } / 2.0
+        var run = 0.0
+        for ((value, weight) in sorted) {
+            run += weight
+            if (run >= half) return value
+        }
+        return sorted.last().first
+    }
+
     companion object {
         private const val TAG = "SyncCalibrator"
 
@@ -959,5 +992,6 @@ class SyncCalibrator(
         private const val RETRY_BACKOFF_MS = 8_000L
         private const val MATCH_TOL_MS = 15.0
         private const val MIN_PEAK_Z = 9.0
+
     }
 }
