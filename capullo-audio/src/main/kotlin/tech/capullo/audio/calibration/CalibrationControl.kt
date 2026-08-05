@@ -28,4 +28,20 @@ interface Measurer {
 
     /** Full-capture peaks plus each 6 s half's peaks (for the split-half gate), or null. */
     suspend fun measureHalves(peakCount: Int): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>>?
+
+    /**
+     * A reader BOUND TO THE CAPTURE [measure] just returned: given a lag, how loud the arrival there
+     * was, as a multiple of that capture's own correlation floor. Null when levels aren't available.
+     *
+     * Bound per capture rather than offered as a "level of the latest capture" call, because a
+     * baseline's levels are needed after several more captures have been taken — a latest-capture
+     * accessor would silently answer from the wrong audio.
+     *
+     * Separate from the peaks on purpose. A peak's z is a DETECTION statistic from a top-N search,
+     * so an absent speaker still yields one (the biggest noise lump) and those are order statistics
+     * that sit close together whatever the real gains are — measured at a 0.93 ratio between two
+     * pure-noise peaks, which is exactly what the balance was reading off the rig. Asking for a
+     * KNOWN lag removes the selection: nothing arriving there reads ~1, the floor itself.
+     */
+    fun levelReader(): ((Double) -> Double)? = null
 }

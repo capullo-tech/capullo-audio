@@ -88,7 +88,41 @@ object Dsp {
      * (unit magnitude per bin) sharpens the peaks and removes the music's spectral
      * coloration. The exact lag convention is pinned by DspTest.
      */
-    fun gccPhat(ref: FloatArray, mic: FloatArray): DoubleArray {
+    fun gccPhat(ref: FloatArray, mic: FloatArray): DoubleArray = crossCorrelate(ref, mic, phat = true)
+
+    /**
+     * Un-whitened normalized cross-correlation of [mic] against [ref], same lag convention as
+     * [gccPhat]. Divided by sqrt(energy(ref) * energy(mic)), so a value at a lag is the fraction of
+     * the mic signal explained by the reference arriving there — bounded, and LINEAR in the
+     * speaker's amplitude.
+     *
+     * This exists because PHAT cannot measure level. Whitening forces every frequency bin to unit
+     * magnitude, which is exactly what makes it a sharp TIMING estimator and exactly what destroys
+     * amplitude. Measured on synthetic scenes with two speakers 300 ms apart: the ratio of these
+     * values recovers a true gain ratio of 0.50/0.25/0.10 as 0.498/0.250/0.101, while the PHAT
+     * z-ratio reports 0.281/0.130/0.052 — wrong by about a factor of two throughout.
+     *
+     * ONLY RATIOS BETWEEN CLIENTS IN ONE CAPTURE ARE MEANINGFUL. On a solo capture the value is
+     * nearly independent of gain (0.996 at full scale, 0.991 at a quarter) because the one speaker
+     * present IS the mic signal, so the normalization divides out the very thing being measured.
+     * Two speakers in the same capture share that normalization, so it cancels in their ratio and
+     * the ratio is the real measurement. This is why the balance harvests from the PROBED capture:
+     * the probe offsets (90/180/360 ms) pull the speakers apart, and accuracy needs about 30 ms of
+     * separation (at 10 ms the same 0.25 truth reads 0.42; from 30 ms it reads 0.26).
+     */
+    fun crossCorrelateLevel(ref: FloatArray, mic: FloatArray): DoubleArray {
+        val r = crossCorrelate(ref, mic, phat = false)
+        var eRef = 0.0
+        var eMic = 0.0
+        for (v in ref) eRef += v.toDouble() * v
+        for (v in mic) eMic += v.toDouble() * v
+        val norm = sqrt(eRef * eMic) + 1e-18
+        for (i in r.indices) r[i] /= norm
+        return r
+    }
+
+    /** Shared FFT cross-correlation core; [phat] selects whitened (timing) or raw (level). */
+    private fun crossCorrelate(ref: FloatArray, mic: FloatArray, phat: Boolean): DoubleArray {
         var n = 1
         while (n < ref.size + mic.size) n = n shl 1
         val aRe = DoubleArray(n); val aIm = DoubleArray(n)
@@ -96,21 +130,59 @@ object Dsp {
         for (i in ref.indices) aRe[i] = ref[i].toDouble()
         for (i in mic.indices) bRe[i] = mic[i].toDouble()
         fft(aRe, aIm); fft(bRe, bIm)
-        // R = MIC * conj(REF), then PHAT-normalize
+        // R = MIC * conj(REF), then PHAT-normalize when whitening is wanted.
         for (k in 0 until n) {
             val rRe = bRe[k] * aRe[k] + bIm[k] * aIm[k]
             val rIm = bIm[k] * aRe[k] - bRe[k] * aIm[k]
-            val mag = sqrt(rRe * rRe + rIm * rIm) + 1e-12
-            aRe[k] = rRe / mag
-            aIm[k] = rIm / mag
+            if (phat) {
+                val mag = sqrt(rRe * rRe + rIm * rIm) + 1e-12
+                aRe[k] = rRe / mag
+                aIm[k] = rIm / mag
+            } else {
+                aRe[k] = rRe
+                aIm[k] = rIm
+            }
         }
         fft(aRe, aIm, inverse = true)
         return aRe
     }
 
     /**
+     * The correlation value at [lagMs], read out of a [crossCorrelateLevel] array.
+     *
+     * Two clients' values from the SAME capture are comparable, and their ratio is the level ratio;
+     * values from different captures are not comparable (see [crossCorrelateLevel]).
+     *
+     * Never read a level off a peak found by [findPeaks]. That is a top-N search, so when a speaker
+     * is absent or below the floor it still returns something — the largest lumps of noise — and
+     * those are order statistics of one distribution, hence always close together. Measured: two
+     * pure-noise peaks sit at a ratio of 0.93 on average, which is exactly what the rig reported
+     * between clients and exactly what it reported for a speaker that was inaudible.
+     *
+     * Takes the max over ±[halfWindowMs] so a lag a fraction of a bin off still finds its own peak.
+     */
+    fun levelAt(
+        r: DoubleArray,
+        fs: Int,
+        lagMs: Double,
+        halfWindowMs: Double = 3.0,
+    ): Double {
+        val center = (lagMs * fs / 1000.0).toInt()
+        val half = (fs * halfWindowMs / 1000.0).toInt().coerceAtLeast(1)
+        var peak = Double.NEGATIVE_INFINITY
+        for (i in (center - half).coerceAtLeast(0) until (center + half + 1).coerceAtMost(r.size)) {
+            if (r[i] > peak) peak = r[i]
+        }
+        return if (peak == Double.NEGATIVE_INFINITY) 0.0 else peak
+    }
+
+    /**
      * Top-[count] peaks of [r] in lag range [loMs]..[hiMs], each z-scored against the
      * median absolute value of that range and separated by at least [guardMs].
+     *
+     * The z here is a DETECTION statistic — "is this lump distinguishable from the floor" — and is
+     * used for exactly that plus ranking. It is NOT a level: see [levelAt] for why reading it as one
+     * silently reports every speaker as equally loud.
      */
     fun findPeaks(
         r: DoubleArray,

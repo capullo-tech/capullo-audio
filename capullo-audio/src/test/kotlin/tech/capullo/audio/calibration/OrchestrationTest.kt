@@ -50,11 +50,20 @@ class OrchestrationTest {
         val control: FakeControl,
         val intrinsic: Map<String, Double>,
         val z: Map<String, Double>,
+        /** How loud each client actually is at the mic, INDEPENDENT of its peak z. Defaults to z so
+         *  existing scenes are unchanged. Kept separate because that independence is the whole
+         *  point: on the rig a speaker below the detection floor still produced a peak whose z sat
+         *  near the reference's, so reading level off z reported an inaudible speaker as even. A
+         *  fake that derives level from z could never catch that. */
+        val level: Map<String, Double>? = null,
         val dropOnMeasureCall: Pair<String, Int>? = null,
         /** Return null (a dead capture) for every measure() call up to and including this 1-based
          *  index, to force a round to fail. Must cover ALL the baseline captures of a round, since
          *  one surviving baseline is enough for the round to proceed. */
         val nullOnMeasureCall: Int? = null,
+        /** Return null for these specific 1-based measure() calls, to make individual captures
+         *  inconclusive without killing a whole round (the rig's actual failure shape). */
+        val nullOnCalls: Set<Int> = emptySet(),
     ) : Measurer {
         var measureCalls = 0
         private fun peaks(callNo: Int): List<Dsp.Peak> = intrinsic.mapNotNull { (id, base) ->
@@ -63,12 +72,27 @@ class OrchestrationTest {
         }
         override suspend fun measure(peakCount: Int): List<Dsp.Peak>? {
             measureCalls++
-            val dead = nullOnMeasureCall != null && measureCalls <= nullOnMeasureCall
+            val dead = (nullOnMeasureCall != null && measureCalls <= nullOnMeasureCall) ||
+                measureCalls in nullOnCalls
             return if (dead) null else peaks(measureCalls)
         }
         override suspend fun measureHalves(peakCount: Int): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>> {
             val p = peaks(-1) // probe measurement; not counted against dropOnMeasureCall
             return Triple(p, p, p)
+        }
+        /** Answers by LAG, like the real one: find whose arrival sits at this lag and report its
+         *  level. A lag nobody is playing at reads ~1.0 (the correlation floor), which is what makes
+         *  an absent speaker distinguishable instead of scoring like a present one. */
+        override fun levelReader(): ((Double) -> Double) {
+            val live = intrinsic.mapValues { (id, base) -> base - (control.latency[id] ?: 0) }
+            return { lag ->
+                val who = live.entries.minByOrNull { kotlin.math.abs(it.value - lag) }
+                if (who != null && kotlin.math.abs(who.value - lag) <= 8.0) {
+                    (level ?: z).getValue(who.key)
+                } else {
+                    1.0
+                }
+            }
         }
     }
 
@@ -430,6 +454,100 @@ class OrchestrationTest {
         assertTrue("no volume write to a muted client", control.volumeCalls.none { it.first == "t" })
     }
 
+    @Test
+    fun `the pair path refuses an implausible correction instead of applying it`() = runTest {
+        // Rig-caught 2026-08-03 calibrating from the OnePlus, whose mic sits beside its own speaker:
+        // the reference came in at z~170-190, the across-room target barely registered, and
+        // attribution latched a music self-similarity cluster ~2.1 s away. The pair path computed
+        // delta=-2144ms and APPLIED it - it only checked the deadband, never plausibility, which the
+        // batch path has always checked. Both probe samples agreed at high weight, so no amount of
+        // repetition or quality weighting can catch it: a stable WRONG match is self-consistent.
+        // Verify did restore it afterwards, but only after a two-second desync had been made audible.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            // The target's apparent peak sits ~2.1 s from the reference - a ghost, not a sink gap.
+            intrinsic = mapOf("ref" to 1000.0, "t" to 3144.0),
+            z = mapOf("ref" to 170.0, "t" to 20.0),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        assertEquals("the implausible correction must never be written", 0, control.latency["t"])
+        val state = cal.state.value
+        val text = (state as? SyncCalibrator.State.Done)?.summary
+            ?: (state as? SyncCalibrator.State.Failed)?.reason ?: ""
+        assertTrue("should report mis-attribution, got: $text", text.contains("implausible"))
+    }
+
+    @Test
+    fun `the pair path harvests levels only from probed captures`() {
+        // Levels come from the PROBED capture and nowhere else. An earlier version also harvested
+        // baselines, to bank more samples at N=2 — that was wrong: in the baseline the speakers sit
+        // at their natural arrivals, which on the rig were about a millisecond apart, and the level
+        // estimator needs ~30 ms of separation. The probe offsets provide it; the baseline cannot.
+        //
+        // So a run yields at most PROBE_REPEATS level captures, one per probe capture that
+        // attributed. Here two of the three probe captures are killed, leaving one, which is under
+        // MIN_LEVEL_SAMPLES — the balance must then decline rather than act on a single reading.
+        runTest {
+            val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+            val measurer = SceneMeasurer(
+                control,
+                intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+                z = mapOf("ref" to 40.0, "t" to 20.0),
+                nullOnCalls = setOf(5, 6), // 1-3 baselines, 4-6 probes
+            )
+            val cal = SyncCalibrator(
+                tapArm = {}, control = control,
+                readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            )
+            cal.calibrate(
+                listOf(
+                    SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                    SyncCalibrator.CalClient("t", "t", 0, 100, false),
+                ),
+            )
+            assertTrue(
+                "one probe capture is under the bar, so nothing may be reported",
+                cal.reduceLevels().isEmpty(),
+            )
+        }
+    }
+
+    @Test
+    fun `a clean pair run banks one level capture per probe capture`() {
+        runTest {
+            val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+            val measurer = SceneMeasurer(
+                control,
+                intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+                z = mapOf("ref" to 40.0, "t" to 20.0),
+                level = mapOf("ref" to 1.0, "t" to 0.5),
+            )
+            val cal = SyncCalibrator(
+                tapArm = {}, control = control,
+                readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            )
+            cal.calibrate(
+                listOf(
+                    SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                    SyncCalibrator.CalClient("t", "t", 0, 100, false),
+                ),
+            )
+            val levels = cal.reduceLevels()
+            assertTrue("both clients measured, got ${levels.keys}", levels.size == 2)
+            assertEquals("the quieter client must read half", 0.5, levels.getValue("t") / levels.getValue("ref"), 1e-9)
+        }
+    }
+
     // ---- end-of-run volume balance --------------------------------------------------
 
     @Test
@@ -508,6 +626,51 @@ class OrchestrationTest {
         )
         assertEquals("the failed correction was restored", 0, control.latency["t"])
         assertTrue("volumes were still balanced", control.volumeCalls.isNotEmpty())
+    }
+
+    @Test
+    fun `a speaker turned right down is not reported as level with the reference`() {
+        // THE RIG FAILURE, 2026-08-04. The OnePlus SW gain was cut 100 -> 35 -> 15 percent; at 15 it
+        // was inaudible in isolation (no peak above MIN_PEAK_Z). The balance still reported it at
+        // 0.93 of the reference and said "already even", because it read the level off the matched
+        // peak's z - and z comes from a top-N search, so an absent speaker gets handed the biggest
+        // noise lump. Two pure-noise peaks sit at a ratio of 0.93 on average, which is precisely the
+        // number the rig kept printing.
+        //
+        // Here z is deliberately kept EQUAL for both clients while the true level differs 20-fold:
+        // any implementation reading z reports "even" and fails this test.
+        runTest {
+            val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+            val measurer = SceneMeasurer(
+                control,
+                intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+                z = mapOf("ref" to 12.0, "t" to 12.0), // detection looks the same for both
+                level = mapOf("ref" to 20.0, "t" to 1.0), // the target is actually at the floor
+            )
+            val cal = SyncCalibrator(
+                tapArm = {}, control = control,
+                readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            )
+            cal.calibrate(
+                listOf(
+                    SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                    SyncCalibrator.CalClient("t", "t", 0, 100, false),
+                ),
+            )
+            val levels = cal.reduceLevels()
+            assertTrue("both clients must be measured, got ${levels.keys}", levels.size == 2)
+            val ratio = levels.getValue("t") / levels.getValue("ref")
+            assertTrue(
+                "a speaker at the floor must not read as level with the reference (ratio $ratio)",
+                ratio < 0.5,
+            )
+            assertTrue(
+                "and the room must not be called balanced",
+                !VolumeBalance.isBalanced(
+                    levels.map { (id, l) -> VolumeBalance.Client(id, 100, l) },
+                ),
+            )
+        }
     }
 
     private companion object {

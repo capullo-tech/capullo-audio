@@ -62,10 +62,16 @@ class SyncCalibrator(
     private val publishOsBoost: (suspend (targets: Map<String, Int>, leaseMs: Long) -> Unit)? = null,
 ) {
 
+    /** Correlation of the most recent [micMeasure], kept so a known lag's LEVEL can be read back
+     *  out of it after attribution has decided which lag belongs to whom. */
+    @Volatile private var lastMeasurement: DelayMeasurement.Measurement? = null
+
     /** The production measurer: records the mic and correlates against [ring]. */
     private fun micMeasurer(ring: ReferencePcmRing) = object : Measurer {
         override suspend fun measure(peakCount: Int) = micMeasure(ring, peakCount)
         override suspend fun measureHalves(peakCount: Int) = micMeasureHalves(ring, peakCount)
+        override fun levelReader(): ((Double) -> Double)? =
+            lastMeasurement?.let { m -> { lag -> m.levelAt(lag) } }
     }
 
     data class CalClient(
@@ -388,12 +394,13 @@ class SyncCalibrator(
         var refNotFound = false
         repeat(PROBE_REPEATS) { attempt ->
             val probed = measurer.measure(4)
+            val probedLevel = measurer.levelReader()
             // One level sample per CAPTURE, not per baseline pairing: the N pairings of one probed
-            // capture all read the same two peaks, so counting them N times would just weight that
+            // capture all read the same two lags, so counting them N times would just weight that
             // capture N-fold in the median.
             var levelled = false
             if (probed != null) {
-                for (base in baselines) {
+                for ((bi, base) in baselines.withIndex()) {
                     val a = PeakAttribution.attribute(base, probed, listOf(refOff, tgtOff), MATCH_TOL_MS)
                     lastAttr = a
                     val r = a.matches[0]
@@ -403,9 +410,20 @@ class SyncCalibrator(
                         val delta = ((t.probedLagMs - tgtOff) - (r.probedLagMs - refOff)).roundToInt()
                         val baseZ = base.maxOfOrNull { it.z } ?: 0.0
                         samples += delta to minOf(baseZ, r.z, t.z)
+                        // LEVELS COME FROM THE PROBED CAPTURE ONLY. The probe offsets
+                        // (90/180/360 ms) have pulled the speakers apart, and the level estimator
+                        // needs about 30 ms of separation to be accurate — at 10 ms a true 0.25
+                        // ratio reads 0.42, from 30 ms it reads 0.26. In the BASELINE the speakers
+                        // sit at their natural arrivals, which on a real rig can be a millisecond
+                        // apart, so a baseline harvest would report two speakers as equal however
+                        // different they are. Probing solves the separation problem for free.
                         if (harvestLevels && !levelled) {
                             levelled = true
-                            levelCaptures += mapOf(reference.id to r.z, target.id to t.z)
+                            val rl = probedLevel?.invoke(r.probedLagMs)
+                            val tl = probedLevel?.invoke(t.probedLagMs)
+                            if (rl != null && tl != null && rl > 0.0 && tl > 0.0) {
+                                levelCaptures += mapOf(reference.id to rl, target.id to tl)
+                            }
                         }
                     }
                 }
@@ -437,6 +455,21 @@ class SyncCalibrator(
             "pair ${reference.name}/${target.name}: delta=${deltaMs}ms " +
                 "latency ${target.latencyMs} -> $newLatency",
         )
+        // PLAUSIBILITY FIRST. A delta larger than any real sink gap means the target was matched to
+        // a ghost, and it must be thrown out before anything else looks at it.
+        //
+        // Rig-caught 2026-08-03, calibrating from the OnePlus (its mic sits beside its own speaker,
+        // so the reference came in at z~170-190 while the across-room target barely registered):
+        // attribution latched a music self-similarity cluster ~2.1 s away and the pair path computed
+        // delta=-2144ms. Both probe samples agreed, and they agreed at high weight (19 and 21), so
+        // neither repetition, the weighted median, nor the split-half idea can catch this — a stable
+        // WRONG match is perfectly self-consistent. The batch path has always gated on
+        // MAX_PLAUSIBLE_DELTA_MS; the pair path checked only the deadband and then went straight to
+        // applying a two-second correction, which is audible catastrophe rather than a bad trim.
+        if (abs(deltaMs) > MAX_PLAUSIBLE_DELTA_MS) {
+            commitLatency(target.id, target.latencyMs)
+            return "${target.name}: implausible Δ${deltaMs}ms — skipped (suspected mis-attribution)"
+        }
         // DAMPING: distrust a correction that contradicts this sink's own recent history by more
         // than the measurement can resolve. A single run is one noisy sample, so without this the
         // system confidently applies a value its next run disagrees with; deferring costs nothing
@@ -557,6 +590,7 @@ class SyncCalibrator(
                 delay(SETTLE_MS)
                 // Halves of the probe capture drive the split-half consistency gate below.
                 val probedTriple = measurer.measureHalves(peakCount)
+                val probedLevel = measurer.levelReader()
                 if (probedTriple == null) {
                     commitLatency(reference.id, reference.latencyMs)
                     sim.forEach { commitLatency(it.id, it.latencyMs) }
@@ -581,23 +615,30 @@ class SyncCalibrator(
                         } +
                         " ghosts=${attr.ghostLagsMs.map { "%.0f".format(it) }}",
                 )
-                // Harvest levels for the balance. Two samples per client from two DIFFERENT captures
-                // (the probed peak and the baseline leader it was matched to), because one capture
-                // is too noisy to distinguish a real imbalance from measurement scatter. Clients the
-                // detectability pre-boost touched are excluded: their gain no longer describes their
-                // loudness.
+                // Harvest levels for the balance, FROM THE PROBED CAPTURE ONLY.
+                //
+                // Read at the MATCHED LAG, never off the matched peak's z: a peak's z comes from a
+                // top-N search, so a speaker that is absent or under the floor still gets one (the
+                // largest noise lump), and those heights track each other instead of the gains —
+                // measured at a 0.93 ratio between two pure-noise peaks, which is what the rig kept
+                // reporting for an inaudible speaker.
+                //
+                // The baseline is NOT harvested. There the speakers sit at their natural arrivals,
+                // which can be a millisecond apart in a real room, and the level estimator needs
+                // about 30 ms of separation to be accurate. The probe offsets (90/180/360 ms)
+                // guarantee that separation, so the probed capture is the one place levels can be
+                // trusted. Clients the pre-boost touched are excluded: their gain no longer
+                // describes their loudness.
                 val boosted = preBoost.map { it.id }.toSet()
                 val probedLevels = mutableMapOf<String, Double>()
-                val baselineLevels = mutableMapOf<String, Double>()
                 for (i in -1 until sim.size) {
                     val client = if (i < 0) reference else sim[i]
                     val m = attr.matches[i + 1] ?: continue
                     if (client.id in boosted) continue
-                    probedLevels[client.id] = m.z
-                    zAt(baseline, m.baselineLagMs)?.let { baselineLevels[client.id] = it }
+                    probedLevel?.invoke(m.probedLagMs)?.takeIf { it > 0.0 }
+                        ?.let { probedLevels[client.id] = it }
                 }
                 if (probedLevels.size >= 2) levelCaptures += probedLevels
-                if (baselineLevels.size >= 2) levelCaptures += baselineLevels
                 if (refMatch == null) {
                     // Reference could not be identified by its displacement → whole batch
                     // untrusted. Remove target probes and degrade them to v1 pair rounds
@@ -847,7 +888,9 @@ class SyncCalibrator(
             val capture = mic!!.record(CAPTURE_MS)
             if (capture != null) {
                 val snapshot = ring.snapshot()
-                val peaks = DelayMeasurement.estimateSpeakerDelays(snapshot, capture, peakCount)
+                val m = DelayMeasurement.measure(snapshot, capture, peakCount)
+                lastMeasurement = m
+                val peaks = m?.peaks ?: emptyList()
                 Log.i(TAG, "peaks: " + peaks.joinToString { "%.1fms(z=%.1f)".format(it.lagMs, it.z) })
                 val salient = peaks.filter { it.z >= MIN_PEAK_Z }
                 if (salient.isNotEmpty()) return salient
@@ -884,10 +927,6 @@ class SyncCalibrator(
 
     // ---- volume balance ------------------------------------------------------------
 
-    /** Salience of the peak sitting at [lagMs] in [peaks], or null if none is that close. Used to
-     *  read a second, independent level sample out of the baseline capture. */
-    private fun zAt(peaks: List<Dsp.Peak>, lagMs: Double, tolMs: Double = PeakAttribution.CLUSTER_MS) =
-        peaks.filter { abs(it.lagMs - lagMs) <= tolMs }.maxOfOrNull { it.z }
 
     /**
      * Even the speakers out AT THE MIC, so the stereo image centres where the recording device sits
@@ -913,7 +952,12 @@ class SyncCalibrator(
             Log.i(
                 TAG,
                 "balance: capture $i " + capture.entries.joinToString {
-                    "${name(it.key)}=%.2f(z=%.1f)".format(if (loudest > 0) it.value / loudest else 0.0, it.value)
+                    // Raw value printed in exponent form: it is a normalized correlation (~1e-2),
+                    // not a z-score, and %.1f truncated every one of them to "0.0" on the rig.
+                    "${name(it.key)}=%.2f(raw=%.3e)".format(
+                        if (loudest > 0) it.value / loudest else 0.0,
+                        it.value,
+                    )
                 },
             )
         }
@@ -964,14 +1008,14 @@ class SyncCalibrator(
     /**
      * Reduce [levelCaptures] to one level per client: normalise each capture against its own
      * loudest client, then take the median across captures. Clients seen in fewer than
-     * [MIN_LEVEL_SAMPLES] captures are dropped — one reading scatters by more than the imbalance
-     * being looked for, so it is not evidence of anything.
+     * [MIN_LEVEL_SAMPLES] captures are dropped.
      *
-     * The normalisation is what makes the medians comparable at all. Absolute salience swings
-     * capture to capture for reasons that have nothing to do with any speaker's volume (mic AGC,
-     * program material, how autocorrelated the last 12 s happened to be), and that swing is common
-     * to every client in the capture. Dividing it out first leaves only the part that differs
-     * between speakers, which is the part the balance is supposed to act on.
+     * The within-capture normalisation is not a tidying step, it is what makes the numbers mean
+     * anything. A raw correlation value depends on that capture's program material and mic gain,
+     * and on a solo capture it is nearly independent of the speaker's own volume (see
+     * [Dsp.crossCorrelateLevel]) — but those factors are COMMON to every client in one capture, so
+     * they cancel in a within-capture ratio and leave exactly the between-speaker difference the
+     * balance acts on. Ratios across captures do not cancel and are meaningless.
      */
     internal fun reduceLevels(): Map<String, Double> {
         val normalised = LinkedHashMap<String, MutableList<Double>>()
@@ -1162,9 +1206,16 @@ class SyncCalibrator(
         private const val MATCH_TOL_MS = 15.0
         private const val MIN_PEAK_Z = 9.0
 
-        /** Unboosted level readings a client needs before the balance will move its volume. The
-         *  proxy scatters by more than the imbalance it is looking for on a single capture, so one
-         *  reading is not evidence of anything. */
-        private const val MIN_LEVEL_SAMPLES = 2
+        /** Unboosted level readings a client needs before the balance will move its volume.
+         *
+         *  THREE, not two, and the first rig run is why. It balanced off two captures that put the
+         *  same speaker at 0.93 and 0.51 — a 1.8x spread on the very quantity being balanced — and a
+         *  median of two is just their midpoint, so a 44-point volume change rested on two readings
+         *  that flatly disagreed. Three is the smallest count at which the median is an actual vote
+         *  rather than an average, so one bad capture is outvoted instead of averaged in.
+         *
+         *  The cost is runs that decline to balance, which is the right way to be wrong here: the
+         *  levels are still logged, and the next run decides. */
+        internal const val MIN_LEVEL_SAMPLES = 3
     }
 }

@@ -58,16 +58,36 @@ class LevelReductionTest {
     }
 
     @Test
-    fun `a client seen only once is not reported`() {
-        // One reading scatters by more than the imbalance being looked for, so it is not evidence.
+    fun `a client seen too few times is not reported`() {
+        // Too few readings scatter by more than the imbalance being looked for, so they are not
+        // evidence. Built from the threshold rather than a hardcoded count, so raising the bar
+        // (2 -> 3 after the first rig run balanced off two captures that disagreed 0.93 vs 0.51)
+        // cannot leave this test quietly asserting the old rule.
+        // "a" is in every capture so it clears the bar; each partner appears in one capture fewer
+        // than the threshold, so none of them do. A capture needs two clients to carry a ratio at
+        // all, hence the rotating partner rather than a lone "a".
+        val enough = SyncCalibrator.MIN_LEVEL_SAMPLES
+        val captures = (0 until enough).map { mapOf("a" to 20.0, "partner$it" to 10.0) } +
+            List(enough - 1) { mapOf("a" to 20.0, "short" to 18.0) }
+        val levels = calibratorWith(*captures.toTypedArray()).reduceLevels()
+        assertTrue("a cleared the bar", levels.containsKey("a"))
+        assertTrue("a partner seen once is dropped", !levels.containsKey("partner0"))
+        assertTrue("one capture short of the bar is dropped", !levels.containsKey("short"))
+    }
+
+    @Test
+    fun `one capture cannot be banked twice and outvote the others`() {
+        // The pair path re-pairs every baseline with every probe capture, so a baseline harvested
+        // per PAIRING rather than per CAPTURE would be counted N times and drag the median onto
+        // whatever that one capture happened to read. Here a single repeated capture disagrees with
+        // two others; duplicated three times it would win, counted once it cannot.
+        val odd = mapOf("a" to 10.0, "b" to 10.0) // claims the two are equal
         val cal = calibratorWith(
-            mapOf("a" to 20.0, "b" to 10.0),
-            mapOf("a" to 20.0, "c" to 18.0),
+            odd,
+            mapOf("a" to 20.0, "b" to 10.0), // both of these say b is half of a
+            mapOf("a" to 30.0, "b" to 15.0),
         )
-        val levels = cal.reduceLevels()
-        assertTrue("a was seen twice", levels.containsKey("a"))
-        assertTrue("b was seen once", !levels.containsKey("b"))
-        assertTrue("c was seen once", !levels.containsKey("c"))
+        assertEquals("the odd capture must not be double-counted", 0.5, cal.reduceLevels().getValue("b"), 1e-9)
     }
 
     @Test
