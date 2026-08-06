@@ -73,6 +73,35 @@ class WienerLevelTest {
         return x
     }
 
+    /**
+     * Program with NO LOW END: partials from 80 Hz up, nothing below. A real one is band-limited the
+     * same way at the bottom — music has little sub-50 Hz content and a BT speaker reproduces none of
+     * it — while the MIC has plenty down there that no speaker put in the room.
+     */
+    private fun noLowEnd(n: Int, seed: Int): FloatArray {
+        val rnd = Random(seed)
+        val freqs = DoubleArray(24) { 80.0 + rnd.nextDouble() * 320.0 }
+        val phases = DoubleArray(freqs.size) { rnd.nextDouble() * 6.283 }
+        return FloatArray(n) { i ->
+            val t = i / 1000.0
+            var v = 0.0
+            for (k in freqs.indices) v += kotlin.math.sin(2 * Math.PI * freqs[k] * t + phases[k])
+            v.toFloat()
+        }
+    }
+
+    /** [mic] plus RUMBLE the reference cannot explain: a slow drift and two sub-audio tones. */
+    private fun withRumble(mic: FloatArray, level: Double, seed: Int): FloatArray {
+        val rnd = Random(seed)
+        var walk = 0.0
+        return FloatArray(mic.size) { i ->
+            val t = i / 1000.0
+            walk = 0.999 * walk + rnd.nextDouble() * 2 - 1
+            (mic[i] + level * (0.02 * walk + kotlin.math.sin(2 * Math.PI * 3.0 * t) +
+                0.7 * kotlin.math.sin(2 * Math.PI * 11.0 * t))).toFloat()
+        }
+    }
+
     /** A 2 s bar on repeat — the pathological case, with sidelobes at the loop period. */
     private fun looped(n: Int, seed: Int): FloatArray {
         val bar = broadband(2000, seed)
@@ -109,7 +138,13 @@ class WienerLevelTest {
         val r = if (eps == null) {
             Dsp.crossCorrelateLevel(ref, mic)
         } else {
-            Dsp.crossCorrelateWiener(ref, mic, eps)
+            // These fixtures are generated at 1 sample per ms, so the "sample rate" is 1000 and the
+            // 50 Hz cutoff removes the bottom 10% of the 500 Hz band — against 0.4% of the rig's
+            // 6 kHz band at the decimated 12 kHz. The SAME constant is a much harsher filter here,
+            // so these tables are not directly comparable to rig numbers; they are comparable to
+            // each other, which is all the eps choice needs. Passing 12000 here would cut nothing at
+            // all and the tests would stop exercising the path the rig uses.
+            Dsp.crossCorrelateWiener(ref, mic, sampleRate = 1000, eps = eps)
         }
         val a = Dsp.levelAt(r, fs = 1000, lagMs = lagA.toDouble())
         val b = Dsp.levelAt(r, fs = 1000, lagMs = lagB.toDouble())
@@ -261,6 +296,61 @@ class WienerLevelTest {
             "10ms separation became accurate (%.1f dB) - the baseline could now be harvested, update the harvest policy"
                 .format(errors.getValue(10)),
             abs(errors.getValue(10)) >= 4.0,
+        )
+    }
+
+    @Test
+    fun `mic rumble becomes a baseline unless the low bins are dropped`() {
+        // FOUND ON A REAL CAPTURE, not in simulation. dumps/pcm-20260806-180313 deconvolved with no
+        // cutoff is NEGATIVE across a 470 ms span - which an impulse response cannot be - and its
+        // reported arrivals were the least-negative points on that baseline, 130 ms away from where
+        // PHAT independently put them. With the cutoff the top peak lands at 1178.0 ms against
+        // PHAT's 1186.8, and the two estimators agree on the whole cluster.
+        //
+        // The mechanism: below the program's low-frequency edge, |Ref|^2 is ~0, so the denominator is
+        // LAMBDA ALONE and the bin passes as R/lambda. The regularizer stops the division exploding
+        // but not amplifying, and what it amplifies is mic rumble no speaker produced.
+        // The arrivals are DELIBERATELY tiny against the rumble. On the rig the mic sits ~37 dB below
+        // the reference, and an earlier version of this fixture (arrivals at 1.0, rumble at 3.0)
+        // could not show the defect at all — the same reason the offline synthetic pair kept passing
+        // while the real capture failed. A defect that only appears at realistic SNR needs a fixture
+        // at realistic SNR.
+        val ref = noLowEnd(20_000, 11)
+        val clean = room(ref, listOf(1200 to 0.02f, 1400 to 0.005f), noise = 0.0005, seed = 3)
+        val mic = withRumble(clean, level = 2.0, seed = 5)
+
+        val cut = Dsp.crossCorrelateWiener(ref, mic, sampleRate = 1000)
+        val uncut = Dsp.crossCorrelateWiener(ref, mic, sampleRate = 1000, hpHz = 0.0)
+
+        // A baseline shows up as a profile whose MEAN over a wide quiet span is comparable to its
+        // arrivals, instead of ~0. That is the defect itself, before any question of readout.
+        fun meanOver(r: DoubleArray, fromMs: Int, toMs: Int) =
+            (fromMs until toMs).sumOf { r[it] } / (toMs - fromMs)
+        val baseUncut = abs(meanOver(uncut, 1500, 2500))
+        val baseCut = abs(meanOver(cut, 1500, 2500))
+        assertTrue(
+            "the cutoff left a baseline: %.2e vs %.2e uncut".format(baseCut, baseUncut),
+            baseCut < 0.05 * baseUncut,
+        )
+
+        // And the consequence that reaches the balance: levelAt reads a max over +/-3 ms, so the
+        // offset survives the readout, is added to BOTH clients, and inflates the weaker toward the
+        // stronger. Truth here is -12.04 dB.
+        val ratioCut = 20 * log10(
+            Dsp.levelAt(cut, fs = 1000, lagMs = 1400.0) / Dsp.levelAt(cut, fs = 1000, lagMs = 1200.0),
+        )
+        val ratioUncut = 20 * log10(
+            Dsp.levelAt(uncut, fs = 1000, lagMs = 1400.0) / Dsp.levelAt(uncut, fs = 1000, lagMs = 1200.0),
+        )
+        println("rumble: truth -12.04 dB, uncut %+.2f dB, cut %+.2f dB".format(ratioUncut, ratioCut))
+        assertTrue("with the cutoff the ratio is %.2f dB, truth -12.04".format(ratioCut), abs(ratioCut + 12.04) < 3.0)
+        // NaN counts as failing, and is the usual outcome: the uncut profile goes NEGATIVE at the
+        // arrival, so the ratio is the log of a negative number. A profile that cannot even be read
+        // is exactly what the real capture showed.
+        assertTrue(
+            "the uncut estimator survived the rumble (%.2f dB) - the fixture is too weak to show the defect"
+                .format(ratioUncut),
+            !(abs(ratioUncut + 12.04) < 3.0),
         )
     }
 }

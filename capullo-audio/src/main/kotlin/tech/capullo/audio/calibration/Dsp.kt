@@ -151,9 +151,18 @@ object Dsp {
      * has the units of the impulse response, so a peak's height IS the arrival's amplitude rather
      * than something proportional to it through a per-capture constant. Ratios between clients in one
      * capture — the only comparison the balance ever makes — are unaffected either way.
+     *
+     * [sampleRate] is REQUIRED rather than defaulted because [hpHz] is meaningless without it, and a
+     * cutoff silently applied at the wrong rate is exactly the kind of unit error this effort has
+     * already lost a measurement to.
      */
-    fun crossCorrelateWiener(ref: FloatArray, mic: FloatArray, eps: Double = WIENER_EPS): DoubleArray =
-        crossCorrelate(ref, mic, phat = false, wienerEps = eps)
+    fun crossCorrelateWiener(
+        ref: FloatArray,
+        mic: FloatArray,
+        sampleRate: Int,
+        eps: Double = WIENER_EPS,
+        hpHz: Double = WIENER_HP_HZ,
+    ): DoubleArray = crossCorrelate(ref, mic, phat = false, wienerEps = eps, hpBins = hpHz, rate = sampleRate)
 
     /**
      * Regularization strength for [crossCorrelateWiener], as a fraction of mean band power.
@@ -164,10 +173,14 @@ object Dsp {
      *
      * ```
      * program     raw            eps=0.01        eps=0.1        eps=1.0
-     * tonal       -0.06 / -0.11  -6.23 / -12.67  -4.43 / -8.49  -1.79 / -3.26
-     * looped      -7.89 / -17.66 -5.85 / -11.57  -5.84 / -11.54 -5.88 / -11.67
-     * broadband   -6.46 / -13.20 -6.09 / -12.25  -6.08 / -12.22 -6.05 / -12.15
+     * tonal       -0.06 / -0.11  -6.23 / -12.68  -4.42 / -8.48  -1.79 / -3.25
+     * looped      -7.89 / -17.66 -5.97 / -11.91  -5.99 / -11.96 -6.01 / -12.01
+     * broadband   -6.46 / -13.20 -6.10 / -12.26  -6.10 / -12.26 -6.08 / -12.23
      * ```
+     *
+     * RE-MEASURED after [WIENER_HP_HZ] was introduced, because the cutoff is now inside every one of
+     * these numbers. Only `looped` moved materially (-5.85/-11.57 to -5.97/-11.91, i.e. TOWARD
+     * truth); everything else shifted under 0.1 dB and no conclusion below changes.
      *
      * Two things that decide the value. Going LOWER over-sharpens (0.001 gives tonal -6.62/-13.60,
      * overshooting) because too little regularization amplifies bins where the program has no energy.
@@ -177,13 +190,48 @@ object Dsp {
      */
     const val WIENER_EPS = 0.01
 
+    /**
+     * Bins below this are DROPPED from the deconvolution, not merely regularized. Measured on a real
+     * capture, and the difference between a profile that has arrivals in it and one that does not.
+     *
+     * The division is by `|Ref|^2 + lambda`. Below roughly 20 Hz a music program has essentially no
+     * energy, so the denominator is LAMBDA ALONE and the bin passes through as `R/lambda` — the
+     * regularizer stops the division exploding but does not stop it AMPLIFYING. What it amplifies is
+     * not music: mic DC wander, AGC and rumble, none of it correlated with any speaker. The result is
+     * a slow baseline that swamps the arrivals.
+     *
+     * On `dumps/pcm-20260806-180313` (ambient program, two speakers ~1187 ms):
+     *
+     * ```
+     * cutoff   mean over 1140-1610 ms    top peaks reported
+     * none     -2.502e-04                1056.0, 1082.6, 1040.3   <- the baseline, not arrivals
+     * 20 Hz    +5.4e-08                  1178.0, 1227.6, 1194.3
+     * 50 Hz    -9.3e-09                  1178.0, 1194.3, 1227.6
+     * 100 Hz   -3.7e-08                  1178.0, 1194.3, 1227.6
+     * ```
+     *
+     * Uncut, the profile is NEGATIVE across a 470 ms span — which an impulse response cannot be — and
+     * the arrivals it reports are the least-negative points on that baseline. `levelAt` reads a max
+     * over +/-3 ms, so the offset survives the readout and is added to BOTH clients, inflating the
+     * weaker one toward the stronger. That is a live candidate for the 20 dB spread two
+     * identical-gain hardware captures produced on 2026-08-06.
+     *
+     * NOT A TUNED PARAMETER: 20, 50 and 100 Hz give the same peaks to three significant figures. The
+     * value only has to sit above the program's noise floor and below the speakers' usable band; a BT
+     * speaker produces nothing usable below 50 Hz anyway.
+     */
+    const val WIENER_HP_HZ = 50.0
+
     /** Shared FFT cross-correlation core. [phat] selects whitened (timing); [wienerEps] non-null
-     *  selects regularized deconvolution (level); neither selects raw (level, smeared). */
+     *  selects regularized deconvolution (level); neither selects raw (level, smeared).
+     *  [hpBins]/[rate] drop the low bins for the Wiener path only — see [WIENER_HP_HZ]. */
     private fun crossCorrelate(
         ref: FloatArray,
         mic: FloatArray,
         phat: Boolean,
         wienerEps: Double? = null,
+        hpBins: Double = 0.0,
+        rate: Int = 0,
     ): DoubleArray {
         var n = 1
         while (n < ref.size + mic.size) n = n shl 1
@@ -202,8 +250,16 @@ object Dsp {
             for (k in 0 until n) sum += aRe[k] * aRe[k] + aIm[k] * aIm[k]
             lambda = wienerEps * sum / n
         }
+        // Bin k and bin n-k are the same frequency and must be dropped together, or the inverse
+        // transform is no longer real.
+        val kCut = if (wienerEps != null && rate > 0) (hpBins * n / rate).toInt() else 0
         // R = MIC * conj(REF), then whiten (PHAT), deconvolve (Wiener), or leave raw.
         for (k in 0 until n) {
+            if (kCut > 0 && minOf(k, n - k) < kCut) {
+                aRe[k] = 0.0
+                aIm[k] = 0.0
+                continue
+            }
             val rRe = bRe[k] * aRe[k] + bIm[k] * aIm[k]
             val rIm = bIm[k] * aRe[k] - bRe[k] * aIm[k]
             if (phat) {

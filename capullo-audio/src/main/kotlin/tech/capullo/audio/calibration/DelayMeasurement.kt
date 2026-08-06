@@ -101,7 +101,7 @@ object DelayMeasurement {
         // 12 dB difference read as +0.06 dB, i.e. the two speakers reported identical. On hardware
         // the same defect turned a commanded 12 dB into 4.3 dB and produced the 2026-08-06 NO-GO.
         // Dividing by (|Ref|^2 + lambda) removes that autocorrelation and restores it to -13.3 dB.
-        val rl = Dsp.crossCorrelateWiener(refD, micD) // deconvolved: level
+        val rl = Dsp.crossCorrelateWiener(refD, micD, sampleRate = fs) // deconvolved: level
         val n = r.size
 
         // Rotate so index j == total delay of j decimated samples: delayed[j] = r[(j − pre) mod n].
