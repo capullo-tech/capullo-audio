@@ -99,4 +99,82 @@ class VolumeBalanceTest {
         assertTrue(!VolumeBalance.isWorthApplying(current, mapOf("a" to 61, "b" to 41)))
         assertTrue(VolumeBalance.isWorthApplying(current, mapOf("a" to 70, "b" to 40)))
     }
+
+    /** How far [to] sits from [from] in true dB of amplitude, through the snapclient volume curve. */
+    private fun movedDb(from: Int, to: Int): Double = 20.0 * Math.log10(
+        VolumeBalance.percentToAmplitude(to) / VolumeBalance.percentToAmplitude(from),
+    )
+
+    @Test
+    fun `the volume percentage is a base-10 exponential, not a linear amplitude`() {
+        // The mapping snapclient actually applies, and the reason every dB figure in this class has to
+        // go through it. Checked against the curve's own arithmetic rather than a remembered number:
+        // 50% is -12.4 dB and 25% is -21.3 dB, so treating the percentage as amplitude would misstate
+        // a "-6 dB" step by more than the entire pass band of the sensitivity test.
+        assertEquals(1.0, VolumeBalance.percentToAmplitude(100), 1e-9)
+        assertEquals(0.0, VolumeBalance.percentToAmplitude(0), 1e-9)
+        assertEquals(-12.38, movedDb(100, 50), 0.05)
+        assertEquals(-21.26, movedDb(100, 25), 0.05)
+        // -6 dB is 74%, NOT 50%. This is the number the rig sweep has to command.
+        assertEquals(-6.0, movedDb(100, 74), 0.15)
+        // Round trip.
+        for (p in 0..100) {
+            assertEquals(
+                p.toDouble(),
+                VolumeBalance.amplitudeToPercent(VolumeBalance.percentToAmplitude(p)),
+                1e-6,
+            )
+        }
+    }
+
+    @Test
+    fun `no single pass moves a client further than the correction cap`() {
+        // A 20x level difference asks for a correction far past the cap. The point is not that the
+        // answer is wrong - it is that the estimator behind it is not proven on hardware, so one run
+        // must only ever be MAX_CORRECTION_DB wrong. The correct answer arrives over several runs.
+        val start = 100
+        val g = VolumeBalance.computeGains(
+            listOf(c("near", start, 200.0), c("far", start, 10.0)),
+        )!!
+        // Asserted in dB THROUGH THE CURVE. Against the raw percentages this test would pass while
+        // the real move was 12 dB or more, which is exactly the error the cap exists to prevent.
+        val moved = movedDb(start, g.getValue("near"))
+        assertTrue(
+            "near moved ${"%.1f".format(moved)}dB to ${g["near"]}%, past the ${VolumeBalance.MAX_CORRECTION_DB}dB cap",
+            moved >= -VolumeBalance.MAX_CORRECTION_DB - 0.5,
+        )
+    }
+
+    @Test
+    fun `the cap binds on the written value, not on the value before headroom scaling`() {
+        // The group scaling onto HEADROOM_PERCENT is itself a move the user hears, so a cap checked
+        // before it would not bound what actually gets written. Both clients start at full scale here,
+        // so scaling alone already moves everything down and the cap has to account for it.
+        val start = 100
+        val g = VolumeBalance.computeGains(
+            listOf(c("a", start, 500.0), c("b", start, 10.0)),
+        )!!
+        g.forEach { (id, percent) ->
+            val moved = movedDb(start, percent)
+            assertTrue(
+                "$id moved ${"%.1f".format(moved)}dB to $percent%, past the cap",
+                moved >= -VolumeBalance.MAX_CORRECTION_DB - 0.5,
+            )
+        }
+    }
+
+    @Test
+    fun `a correction inside the cap is applied in full`() {
+        // The cap must not become a tax on every run. A modest imbalance has to pass through
+        // untouched, otherwise convergence stalls short of even for no reason.
+        val start = 70
+        val g = VolumeBalance.computeGains(listOf(c("a", start, 22.0), c("b", start, 18.0)))!!
+        val capFloor = VolumeBalance.amplitudeToPercent(
+            VolumeBalance.percentToAmplitude(start) * Math.pow(10.0, -VolumeBalance.MAX_CORRECTION_DB / 20.0),
+        )
+        assertTrue(
+            "a modest correction must not be sitting on the cap ($g, floor ${"%.1f".format(capFloor)}%)",
+            g.values.none { it == capFloor.toInt() },
+        )
+    }
 }

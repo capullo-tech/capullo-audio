@@ -1,6 +1,7 @@
 package tech.capullo.audio.calibration
 
 import kotlin.math.abs
+import kotlin.math.log10
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
@@ -37,12 +38,20 @@ object VolumeBalance {
     const val MIN_PERCENT = 15
 
     /**
-     * How measured salience responds to gain: `measured ≈ gain^EXPONENT`. Fitted at roughly 0.6 from
-     * the rig sweep (SW 12% → z≈13 against SW 100% → z≈34-56), i.e. salience rises much more slowly
-     * than gain. EMPIRICAL AND ROUGH — it assumes the SW percentage is linear in amplitude, and it
-     * must flatten once the measurement stops being noise-limited and becomes reverberation-limited.
-     * It only sets the step size of the correction, never its direction or its fixed point, so an
-     * error here costs an extra iteration rather than a wrong answer.
+     * How measured salience responds to gain: `measured ≈ percent^EXPONENT`. Fitted at roughly 0.6
+     * from the rig sweep (SW 12% → z≈13 against SW 100% → z≈34-56), i.e. salience rises much more
+     * slowly than the percentage.
+     *
+     * EMPIRICAL AND ROUGH, and now known to be fitted against the WRONG AXIS: the 0.6 was measured
+     * against `percent`, but percent is a base-10 exponential in amplitude (see [percentToAmplitude]),
+     * so this exponent is silently absorbing that curve along with whatever the room does. It is not
+     * an acoustic property and should not be read as one.
+     *
+     * Left as-is deliberately rather than re-derived on the spot: it only sets the STEP SIZE of a
+     * correction, never its direction or its fixed point, so an error here costs an extra iteration
+     * rather than a wrong answer — and the correction is now capped at [MAX_CORRECTION_DB] anyway,
+     * which bounds the cost of a bad step. Re-deriving it needs a sensitivity measurement that does
+     * not exist yet; doing it from the same rig data that produced 0.6 would just relabel the error.
      */
     const val LEVEL_EXPONENT = 0.6
 
@@ -53,6 +62,46 @@ object VolumeBalance {
     /** Balanced enough: stop when the loudest and quietest measured levels are within this ratio.
      *  ~1.25 is a hair over 1.9 dB, comfortably inside what anyone notices as an imbalance. */
     const val BALANCE_TOL_RATIO = 1.25
+
+    /**
+     * The most any single run may move one client from the gain it started at, in dB.
+     *
+     * This is a blast radius, not an acoustic judgement, and it exists because the estimator behind
+     * the correction is good rather than proven. Bounding the mistake is what makes acting on a
+     * merely-good measurement rational: with a cap plus an undo record, being wrong costs one action
+     * instead of re-levelling every speaker in the room by hand.
+     *
+     * Six dB is deliberately smaller than the ~10 dB room asymmetry this rig actually shows, so a
+     * correct measurement is CLAMPED rather than fully applied and convergence takes more than one
+     * run. That is the intended trade: repeated runs walk toward the answer, and each one can only
+     * ever be 6 dB wrong. It also composes with the damping, which already converges from below.
+     */
+    const val MAX_CORRECTION_DB = 6.0
+
+    /**
+     * Amplitude a snapclient SW volume percentage actually produces, 0..1.
+     *
+     * **The percentage is nowhere near linear in amplitude, and assuming it was is a real bug this
+     * code carried.** snapclient's default software mixer is the base-10 exponential curve
+     * (`snapclient.cpp` defaults `--mixer` to `software` with no parameter, so `Player::setVolume`
+     * falls through to `setVolume_exp(volume, 10.)`), and the server passes `percent` straight to the
+     * client as `percent/100` with no curve of its own:
+     *
+     * ```
+     * amplitude = (10^(percent/100) - 1) / 9
+     * ```
+     *
+     * The consequences are large enough to invalidate measurements rather than just skew them.
+     * 50% is **-12.4 dB**, not -6 dB. 25% is **-21.3 dB**, not -12 dB. A sensitivity test that
+     * commanded 50% expecting -6 dB and measured -12 dB would have read as an estimator wrong by
+     * 6 dB — outside any sane pass band — and would have killed a working feature on a unit error.
+     */
+    fun percentToAmplitude(percent: Int): Double =
+        ((10.0.pow(percent.coerceIn(0, 100) / 100.0) - 1.0) / 9.0).coerceIn(0.0, 1.0)
+
+    /** Inverse of [percentToAmplitude]: the percentage that yields [amplitude]. */
+    fun amplitudeToPercent(amplitude: Double): Double =
+        100.0 * log10((9.0 * amplitude.coerceIn(0.0, 1.0)) + 1.0)
 
     data class Client(
         val id: String,
@@ -108,8 +157,24 @@ object VolumeBalance {
         // the absolute position is the user's to change afterwards.
         val loudest = ideal.values.max()
         val scale = if (loudest > 0) HEADROOM_PERCENT / loudest else 1.0
-        return ideal.mapValues { (_, g) ->
-            (g * scale).roundToInt().coerceIn(MIN_PERCENT, HEADROOM_PERCENT)
+        val startPercent = measured.associate { it.id to it.gainPercent }
+        return ideal.mapValues { (id, g) ->
+            // CAP LAST, against the gain this client STARTED at, and after the group scaling rather
+            // than before it: the scaling is itself a move the user will hear, so a cap applied to
+            // the pre-scale figure would not bound what actually gets written. Clamping one client
+            // does distort the balance the ratios encode — that is the point. A bounded partial
+            // correction that the next run continues is worth more than a full correction resting on
+            // an estimator whose hardware sensitivity is not yet established.
+            // Convert to AMPLITUDE before applying a dB cap. Capping the percentages directly would
+            // not be a 6 dB cap at all: the percent axis is a base-10 exponential (see
+            // [percentToAmplitude]), so halving the percentage is about 12 dB near the top of the
+            // range and much more further down.
+            val startAmp = percentToAmplitude(startPercent.getValue(id))
+            val loAmp = startAmp * 10.0.pow(-MAX_CORRECTION_DB / 20.0)
+            val hiAmp = startAmp * 10.0.pow(MAX_CORRECTION_DB / 20.0)
+            val lo = amplitudeToPercent(loAmp)
+            val hi = amplitudeToPercent(hiAmp)
+            (g * scale).coerceIn(lo, hi).roundToInt().coerceIn(MIN_PERCENT, HEADROOM_PERCENT)
         }
     }
 
