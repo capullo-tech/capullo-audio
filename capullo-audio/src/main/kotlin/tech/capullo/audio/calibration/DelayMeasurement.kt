@@ -41,11 +41,18 @@ object DelayMeasurement {
         peakCount: Int = 4,
     ): List<Dsp.Peak> = measure(ref, mic, peakCount)?.peaks ?: emptyList()
 
-    fun measure(
-        ref: ReferencePcmRing.Snapshot,
-        mic: MicCapture.Capture,
-        peakCount: Int = 4,
-    ): Measurement? {
+    /**
+     * The two decimated arrays the correlation actually consumes, plus the indexing they need.
+     *
+     * Exposed as its own step so a diagnostic can DUMP exactly what the estimator sees. Every
+     * estimator question so far has cost a rig session and a slow APK install, and offline models
+     * have mispredicted the real rig twice — dumping these makes those questions answerable from a
+     * file instead. Reproducing the windowing in an offline script would risk answering a subtly
+     * different question, which is the whole failure mode being avoided here.
+     */
+    class Prepared(val refD: FloatArray, val micD: FloatArray, val pre: Int, val fs: Int)
+
+    fun prepare(ref: ReferencePcmRing.Snapshot, mic: MicCapture.Capture): Prepared? {
         require(ref.sampleRate == mic.sampleRate) { "rate mismatch" }
         val fsFull = ref.sampleRate
 
@@ -62,15 +69,39 @@ object DelayMeasurement {
         val window = ref.pcm.copyOfRange(w0.toInt(), w1.toInt())
 
         // Decimate 4x (48k → 12k): sub-ms lag resolution at a 16x cheaper FFT.
-        val fs = fsFull / 4
-        val refD = Dsp.decimateBy4(window)
-        val micD = Dsp.decimateBy4(mic.pcm)
         // How far the window reaches into the past before the mic's first sample, in
         // decimated samples: a speaker with total delay D peaks at circular lag (D − pre).
-        val pre = ((iMicStart - w0) / 4).toInt()
+        return Prepared(
+            refD = Dsp.decimateBy4(window),
+            micD = Dsp.decimateBy4(mic.pcm),
+            pre = ((iMicStart - w0) / 4).toInt(),
+            fs = fsFull / 4,
+        )
+    }
+
+    fun measure(
+        ref: ReferencePcmRing.Snapshot,
+        mic: MicCapture.Capture,
+        peakCount: Int = 4,
+    ): Measurement? {
+        val p = prepare(ref, mic) ?: return null
+        val refD = p.refD
+        val micD = p.micD
+        val pre = p.pre
+        val fs = p.fs
 
         val r = Dsp.gccPhat(refD, micD) // whitened: timing
-        val rl = Dsp.crossCorrelateLevel(refD, micD) // un-whitened: level
+        // REGULARIZED DECONVOLUTION for level, not the un-whitened correlation.
+        //
+        // The un-whitened version returns the impulse response convolved with the PROGRAM's own
+        // autocorrelation. On broadband material that is nearly a delta and the estimator looks
+        // perfect, which is why every synthetic test passed. On sustained or tonal music it is wide,
+        // so the value at one speaker's arrival is dominated by the other speaker's sidelobes and
+        // stops responding to gain at all. Measured on tonal material at 90 ms separation: a true
+        // 12 dB difference read as +0.06 dB, i.e. the two speakers reported identical. On hardware
+        // the same defect turned a commanded 12 dB into 4.3 dB and produced the 2026-08-06 NO-GO.
+        // Dividing by (|Ref|^2 + lambda) removes that autocorrelation and restores it to -13.3 dB.
+        val rl = Dsp.crossCorrelateWiener(refD, micD) // deconvolved: level
         val n = r.size
 
         // Rotate so index j == total delay of j decimated samples: delayed[j] = r[(j − pre) mod n].

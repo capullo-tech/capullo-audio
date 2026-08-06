@@ -93,22 +93,26 @@ object Dsp {
     /**
      * Un-whitened normalized cross-correlation of [mic] against [ref], same lag convention as
      * [gccPhat]. Divided by sqrt(energy(ref) * energy(mic)), so a value at a lag is the fraction of
-     * the mic signal explained by the reference arriving there — bounded, and LINEAR in the
-     * speaker's amplitude.
+     * the mic signal explained by the reference arriving there.
      *
-     * This exists because PHAT cannot measure level. Whitening forces every frequency bin to unit
-     * magnitude, which is exactly what makes it a sharp TIMING estimator and exactly what destroys
-     * amplitude. Measured on synthetic scenes with two speakers 300 ms apart: the ratio of these
-     * values recovers a true gain ratio of 0.50/0.25/0.10 as 0.498/0.250/0.101, while the PHAT
-     * z-ratio reports 0.281/0.130/0.052 — wrong by about a factor of two throughout.
+     * **SUPERSEDED for level measurement by [crossCorrelateWiener], and kept only as the comparison
+     * baseline its tests measure against.** It is not wired into [DelayMeasurement] any more. The
+     * defect is not subtle: this returns the impulse response CONVOLVED WITH THE PROGRAM'S OWN
+     * AUTOCORRELATION, and on sustained or tonal music that autocorrelation is hundreds of
+     * milliseconds wide. Measured on tonal material with two speakers 90 ms apart, a true 12 dB
+     * difference reads as **+0.06 dB** — the two speakers reported identical, whatever their gains.
+     * On hardware it turned a commanded 12 dB into 4.3 dB and produced the 2026-08-06 NO-GO.
      *
-     * ONLY RATIOS BETWEEN CLIENTS IN ONE CAPTURE ARE MEANINGFUL. On a solo capture the value is
-     * nearly independent of gain (0.996 at full scale, 0.991 at a quarter) because the one speaker
-     * present IS the mic signal, so the normalization divides out the very thing being measured.
-     * Two speakers in the same capture share that normalization, so it cancels in their ratio and
-     * the ratio is the real measurement. This is why the balance harvests from the PROBED capture:
-     * the probe offsets (90/180/360 ms) pull the speakers apart, and accuracy needs about 30 ms of
-     * separation (at 10 ms the same 0.25 truth reads 0.42; from 30 ms it reads 0.26).
+     * It looks excellent on broadband material, where the autocorrelation is nearly a delta: a true
+     * 0.50/0.25/0.10 comes back as 0.498/0.250/0.101 (PHAT's z-ratio gives 0.281/0.130/0.052). Every
+     * synthetic validation used exactly that kind of signal, which is why the defect survived three
+     * attempts to find it. Do not re-adopt this on the strength of a broadband test.
+     *
+     * ONLY RATIOS BETWEEN CLIENTS IN ONE CAPTURE ARE MEANINGFUL — true of both estimators. On a solo
+     * capture the value is nearly independent of gain (0.996 at full scale, 0.991 at a quarter)
+     * because the one speaker present IS the mic signal, so the normalization divides out the very
+     * thing being measured. Two speakers in one capture share that normalization, so it cancels in
+     * their ratio.
      */
     fun crossCorrelateLevel(ref: FloatArray, mic: FloatArray): DoubleArray {
         val r = crossCorrelate(ref, mic, phat = false)
@@ -121,8 +125,66 @@ object Dsp {
         return r
     }
 
-    /** Shared FFT cross-correlation core; [phat] selects whitened (timing) or raw (level). */
-    private fun crossCorrelate(ref: FloatArray, mic: FloatArray, phat: Boolean): DoubleArray {
+    /**
+     * REGULARIZED DECONVOLUTION of [mic] by [ref] — `R / (|Ref|^2 + lambda)` with
+     * `lambda = eps * mean(|Ref|^2)`. Same lag convention as [gccPhat].
+     *
+     * The middle ground between the two estimators above, and the answer to why neither works.
+     * PHAT divides by `|R|`, forcing every bin to unit magnitude: sharp timing, amplitude destroyed.
+     * [crossCorrelateLevel] divides by nothing: amplitude kept, but the result is the true impulse
+     * response CONVOLVED WITH THE PROGRAM'S OWN AUTOCORRELATION. On broadband material that
+     * autocorrelation is nearly a delta and the smearing is invisible — which is why every synthetic
+     * validation passed. On sustained or tonal music it is wide, so the value read at one speaker's
+     * arrival is dominated by the OTHER speaker's autocorrelation sidelobes, which do not change when
+     * the first speaker's gain changes. That is the measured cause of the balance's failure: on tonal
+     * material a commanded 6 dB move shifted the reported ratio by 0.06 dB
+     * (`LevelPositionBiasTest`), and on hardware a commanded 12 dB move produced 4.3 dB.
+     *
+     * Dividing by `|Ref|^2` removes exactly that autocorrelation while keeping amplitude, since
+     * `R/|Ref|^2` is the impulse response itself rather than a smeared copy. The `lambda` term is
+     * what stops that division exploding in bins where the program has no energy — the whole reason
+     * plain deconvolution is unusable on real signals. [eps] sets how much noise is traded for how
+     * much sharpening: 0 is exact deconvolution (unstable), large eps degenerates toward the
+     * un-whitened correlation.
+     *
+     * NOT NORMALIZED, unlike [crossCorrelateLevel], and deliberately so: the deconvolution already
+     * has the units of the impulse response, so a peak's height IS the arrival's amplitude rather
+     * than something proportional to it through a per-capture constant. Ratios between clients in one
+     * capture — the only comparison the balance ever makes — are unaffected either way.
+     */
+    fun crossCorrelateWiener(ref: FloatArray, mic: FloatArray, eps: Double = WIENER_EPS): DoubleArray =
+        crossCorrelate(ref, mic, phat = false, wienerEps = eps)
+
+    /**
+     * Regularization strength for [crossCorrelateWiener], as a fraction of mean band power.
+     *
+     * 0.01, chosen from the measured sweep in `WienerLevelTest` rather than from the literature's
+     * usual hand-wave, and never tuned against rig data. Sensitivity to a commanded -6/-12 dB change,
+     * where the raw estimator's failure on tonal material is the whole reason this exists:
+     *
+     * ```
+     * program     raw            eps=0.01        eps=0.1        eps=1.0
+     * tonal       -0.06 / -0.11  -6.23 / -12.67  -4.43 / -8.49  -1.79 / -3.26
+     * looped      -7.89 / -17.66 -5.85 / -11.57  -5.84 / -11.54 -5.88 / -11.67
+     * broadband   -6.46 / -13.20 -6.09 / -12.25  -6.08 / -12.22 -6.05 / -12.15
+     * ```
+     *
+     * Two things that decide the value. Going LOWER over-sharpens (0.001 gives tonal -6.62/-13.60,
+     * overshooting) because too little regularization amplifies bins where the program has no energy.
+     * Going HIGHER degenerates back toward the un-whitened estimator, and the tonal column shows that
+     * happening smoothly from 0.03 onward. 0.01 also beats raw on broadband and fixes the looped
+     * case's over-sensitivity, so it is not a tonal-only patch.
+     */
+    const val WIENER_EPS = 0.01
+
+    /** Shared FFT cross-correlation core. [phat] selects whitened (timing); [wienerEps] non-null
+     *  selects regularized deconvolution (level); neither selects raw (level, smeared). */
+    private fun crossCorrelate(
+        ref: FloatArray,
+        mic: FloatArray,
+        phat: Boolean,
+        wienerEps: Double? = null,
+    ): DoubleArray {
         var n = 1
         while (n < ref.size + mic.size) n = n shl 1
         val aRe = DoubleArray(n); val aIm = DoubleArray(n)
@@ -130,7 +192,17 @@ object Dsp {
         for (i in ref.indices) aRe[i] = ref[i].toDouble()
         for (i in mic.indices) bRe[i] = mic[i].toDouble()
         fft(aRe, aIm); fft(bRe, bIm)
-        // R = MIC * conj(REF), then PHAT-normalize when whitening is wanted.
+        // The regularizer is a fraction of the program's MEAN band power, so it adapts to the
+        // material and to the overall level instead of being an absolute floor that means different
+        // things on quiet and loud passages. Computed before the loop below overwrites the reference
+        // spectrum in place.
+        var lambda = 0.0
+        if (wienerEps != null) {
+            var sum = 0.0
+            for (k in 0 until n) sum += aRe[k] * aRe[k] + aIm[k] * aIm[k]
+            lambda = wienerEps * sum / n
+        }
+        // R = MIC * conj(REF), then whiten (PHAT), deconvolve (Wiener), or leave raw.
         for (k in 0 until n) {
             val rRe = bRe[k] * aRe[k] + bIm[k] * aIm[k]
             val rIm = bIm[k] * aRe[k] - bRe[k] * aIm[k]
@@ -138,6 +210,10 @@ object Dsp {
                 val mag = sqrt(rRe * rRe + rIm * rIm) + 1e-12
                 aRe[k] = rRe / mag
                 aIm[k] = rIm / mag
+            } else if (wienerEps != null) {
+                val den = aRe[k] * aRe[k] + aIm[k] * aIm[k] + lambda + 1e-18
+                aRe[k] = rRe / den
+                aIm[k] = rIm / den
             } else {
                 aRe[k] = rRe
                 aIm[k] = rIm
