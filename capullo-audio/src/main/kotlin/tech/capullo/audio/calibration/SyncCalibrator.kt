@@ -7,6 +7,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
+import kotlin.math.ln
+import kotlin.math.log10
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 /**
@@ -51,6 +54,9 @@ class SyncCalibrator(
     private val journal: CalibrationJournal? = null,
     /** Appends each verified correction for later per-sink analysis. Null disables it. */
     private val history: CalibrationHistory? = null,
+    /** Records the volumes the balance overwrote so [undoBalance] can put them back. Null makes the
+     *  balance one-way, which is why it is worth supplying: see [VolumeUndo]. */
+    private val volumeUndo: VolumeUndo? = null,
     /** Builds the [Measurer] for a run's ring. Null uses the real mic measurer; tests inject
      *  a factory returning a fake to drive the orchestration deterministically. */
     private val measurerFactory: ((ReferencePcmRing) -> Measurer)? = null,
@@ -421,6 +427,28 @@ class SyncCalibrator(
                             levelled = true
                             val rl = probedLevel?.invoke(r.probedLagMs)
                             val tl = probedLevel?.invoke(t.probedLagMs)
+                            // LOG THE WHOLE PROVENANCE OF THE LEVEL PAIR, not just the numbers. A
+                            // swapped attribution (drift wrong by the 90 ms between refOff and
+                            // tgtOff) reports the reciprocal ratio with full confidence, and the
+                            // only way to see that in a log rather than infer it a week later is to
+                            // have the two lags, the two raw values, the dB between them and the
+                            // drift on one line. Both lags in particular: a swap is visible as the
+                            // reference sitting at the target's arrival, and no reduced number can
+                            // show that.
+                            Log.i(
+                                TAG,
+                                "level capture ${levelCaptures.size}: " +
+                                    "${reference.name}@%.1fms=%.3e ".format(r.probedLagMs, rl ?: 0.0) +
+                                    "${target.name}@%.1fms=%.3e ".format(t.probedLagMs, tl ?: 0.0) +
+                                    "delta=%+.1fdB drift=%.1fms base=$bi".format(
+                                        if (rl != null && tl != null && rl > 0.0 && tl > 0.0) {
+                                            20.0 * log10(tl / rl)
+                                        } else {
+                                            0.0
+                                        },
+                                        a.driftMs,
+                                    ),
+                            )
                             if (rl != null && tl != null && rl > 0.0 && tl > 0.0) {
                                 levelCaptures += mapOf(reference.id to rl, target.id to tl)
                             }
@@ -638,7 +666,20 @@ class SyncCalibrator(
                     probedLevel?.invoke(m.probedLagMs)?.takeIf { it > 0.0 }
                         ?.let { probedLevels[client.id] = it }
                 }
-                if (probedLevels.size >= 2) levelCaptures += probedLevels
+                if (probedLevels.size >= 2) {
+                    // Same provenance line as the pair path: matched lag and raw value per client,
+                    // plus the drift, so a swapped attribution is readable in the log.
+                    Log.i(
+                        TAG,
+                        "level capture ${levelCaptures.size}: " + probedLevels.entries.joinToString {
+                            val lag = attr.matches
+                                .getOrNull((listOf(reference) + sim).indexOfFirst { c -> c.id == it.key })
+                                ?.probedLagMs ?: 0.0
+                            "${it.key}@%.1fms=%.3e".format(lag, it.value)
+                        } + " drift=%.1fms".format(attr.driftMs),
+                    )
+                    levelCaptures += probedLevels
+                }
                 if (refMatch == null) {
                     // Reference could not be identified by its displacement → whole batch
                     // untrusted. Remove target probes and degrade them to v1 pair rounds
@@ -989,6 +1030,10 @@ class SyncCalibrator(
             return
         }
         Log.i(TAG, "balance: levels ${measured.joinToString { describe(it) }} volumes $current -> $gains")
+        // Record what is about to be overwritten BEFORE overwriting it, so an interruption can never
+        // leave written volumes with no way back. Only the clients actually being written are
+        // recorded: restoring a client the balance never touched would be its own surprise.
+        volumeUndo?.save(current.filterKeys { it in gains.keys })
         // NonCancellable: these writes are PERSISTENT and the room is left in whatever state they
         // reach. Cancelling the run (the host cancels the job on stop) between two of them would
         // suspend-throw partway through and strand a half-balanced set of volumes — worse than
@@ -997,7 +1042,8 @@ class SyncCalibrator(
         withContext(NonCancellable) {
             gains.forEach { (id, percent) -> control.sendSetVolume(id, muted = false, percent = percent) }
         }
-        val note = "; balanced volumes: " + gains.entries.joinToString { (id, g) -> "${name(id)} $g%" }
+        val note = "; balanced volumes: " + gains.entries.joinToString { (id, g) -> "${name(id)} $g%" } +
+            if (volumeUndo != null) " (undoable)" else ""
         when (val s = _state.value) {
             is State.Done -> _state.value = State.Done(s.summary + note)
             is State.Failed -> _state.value = State.Failed(s.reason + note)
@@ -1005,28 +1051,119 @@ class SyncCalibrator(
         }
     }
 
+    /** True when a balance is outstanding and [undoBalance] has something to put back. Lets the host
+     *  offer the undo only when it would do something. */
+    fun canUndoBalance(): Boolean = volumeUndo?.load() != null
+
     /**
-     * Reduce [levelCaptures] to one level per client: normalise each capture against its own
-     * loudest client, then take the median across captures. Clients seen in fewer than
-     * [MIN_LEVEL_SAMPLES] captures are dropped.
+     * Put back the volumes the last balance overwrote, and return the clients restored (empty if
+     * there was nothing to undo).
      *
-     * The within-capture normalisation is not a tidying step, it is what makes the numbers mean
-     * anything. A raw correlation value depends on that capture's program material and mic gain,
-     * and on a solo capture it is nearly independent of the speaker's own volume (see
-     * [Dsp.crossCorrelateLevel]) — but those factors are COMMON to every client in one capture, so
-     * they cancel in a within-capture ratio and leave exactly the between-speaker difference the
-     * balance acts on. Ratios across captures do not cancel and are meaningless.
+     * Unmutes as it goes, matching what the balance itself wrote: a balanced client was written
+     * `muted = false`, so restoring the percentage while leaving a mute the balance had cleared would
+     * hand back a state the user never had. Unlike [recover] this is a deliberate user action on a
+     * completed run, so the record is consumed — pressing undo twice does not walk further back.
+     *
+     * NonCancellable for the same reason the balance writes are: a partial restore is worse than
+     * either end state.
+     */
+    suspend fun undoBalance(): List<String> {
+        val previous = volumeUndo?.load() ?: return emptyList()
+        Log.i(TAG, "undoing balance for ${previous.size} client(s): $previous")
+        withContext(NonCancellable) {
+            previous.forEach { (id, percent) ->
+                control.sendSetVolume(id, muted = false, percent = percent)
+            }
+        }
+        volumeUndo.clear()
+        return previous.keys.toList()
+    }
+
+    /**
+     * Reduce [levelCaptures] to one level per client, keeping only clients whose captures AGREE
+     * with each other. Clients that disagree are dropped, and a dropped client is not balanced.
+     *
+     * Two steps, and the second one is a safety gate rather than statistics.
+     *
+     * **Centre each capture on its own mean, in log space.** A raw correlation value depends on that
+     * capture's program material and mic gain, and on a solo capture it is nearly independent of the
+     * speaker's own volume (see [Dsp.crossCorrelateLevel]) — but those factors are COMMON to every
+     * client in one capture, so they cancel in a within-capture comparison and leave exactly the
+     * between-speaker difference the balance acts on. Values from different captures never cancel
+     * and are meaningless to compare directly. Log space rather than "divide by the loudest" because
+     * the quantity is a ratio, decibels are the unit a tolerance is meaningful in, and centring on
+     * the mean is symmetric: it does not silently anoint one client as the reference.
+     *
+     * **Then require the captures to agree, and treat a SIGN flip as fatal.** Before this gate
+     * existed the median was taken and written out with full confidence however much the inputs
+     * disagreed: given {0.81, 0.38, 0.90} it wrote 0.81. The only thing that ever stopped a
+     * persistent wrong volume was a capture happening to fail. Two distinct rejections:
+     *
+     *  - **Sign disagreement.** Attribution can swap the two clients — a global drift estimate wrong
+     *    by the 90 ms between `refOff` and `tgtOff` matches each client at the other's arrival
+     *    ([PeakAttribution.attribute] adopts whichever drift attributes more entities). A swap
+     *    reports the RECIPROCAL ratio, so in centred log space it flips the sign of every client.
+     *    One capture calling a speaker louder than average while another calls it quieter is that
+     *    signature, and nothing else plausible produces it, so it declines the client outright
+     *    instead of being averaged away. Guarded by [LEVEL_SIGN_DEADBAND_DB] so a genuinely
+     *    balanced room, sitting near zero, does not trip it on noise.
+     *  - **Spread.** Captures further than [LEVEL_AGREEMENT_DB] from the median are dropped as
+     *    outliers, and the surviving count — not the count that merely produced a number — is what
+     *    must reach [MIN_LEVEL_SAMPLES]. The gate is "survived AND agreed".
+     *
+     * Returns levels on a linear scale normalised to the loudest surviving client, which is what
+     * [VolumeBalance] expects; it uses only ratios, so the choice of scale does not reach the output.
      */
     internal fun reduceLevels(): Map<String, Double> {
-        val normalised = LinkedHashMap<String, MutableList<Double>>()
+        // Centred log levels, in dB, one list per client. A capture with fewer than two clients
+        // carries no between-client information at all and is not evidence of anything.
+        val centred = LinkedHashMap<String, MutableList<Double>>()
         for (capture in levelCaptures) {
-            val loudest = capture.values.maxOrNull() ?: continue
-            if (loudest <= 0.0 || capture.size < 2) continue
-            capture.forEach { (id, z) -> normalised.getOrPut(id) { mutableListOf() } += z / loudest }
+            val usable = capture.filterValues { it > 0.0 }
+            if (usable.size < 2) continue
+            val meanLog = usable.values.sumOf { ln(it) } / usable.size
+            usable.forEach { (id, v) ->
+                centred.getOrPut(id) { mutableListOf() } += 20.0 / LN10 * (ln(v) - meanLog)
+            }
         }
-        return normalised
-            .filterValues { it.size >= MIN_LEVEL_SAMPLES }
-            .mapValues { (_, v) -> median(v) }
+        val kept = LinkedHashMap<String, Double>()
+        for ((id, samples) in centred) {
+            val hiSide = samples.any { it > LEVEL_SIGN_DEADBAND_DB }
+            val loSide = samples.any { it < -LEVEL_SIGN_DEADBAND_DB }
+            val fmt = samples.joinToString { "%+.1f".format(it) }
+            if (hiSide && loSide) {
+                Log.w(
+                    TAG,
+                    "balance: $id DECLINED — captures disagree on SIGN ($fmt dB), which is the " +
+                        "signature of a swapped attribution, not noise",
+                )
+                continue
+            }
+            val mid = median(samples)
+            val agreed = samples.filter { abs(it - mid) <= LEVEL_AGREEMENT_DB }
+            if (agreed.size < MIN_LEVEL_SAMPLES) {
+                Log.i(
+                    TAG,
+                    "balance: $id DECLINED — only ${agreed.size} of ${samples.size} capture(s) " +
+                        "agree within ${LEVEL_AGREEMENT_DB}dB of the median %+.1fdB ($fmt dB); ".format(mid) +
+                        "need $MIN_LEVEL_SAMPLES",
+                )
+                continue
+            }
+            val estimate = median(agreed)
+            Log.i(
+                TAG,
+                "balance: $id level %+.1fdB from ${agreed.size}/${samples.size} agreeing capture(s) "
+                    .format(estimate) + "(spread %.1fdB)".format(
+                    (agreed.maxOrNull() ?: 0.0) - (agreed.minOrNull() ?: 0.0),
+                ),
+            )
+            kept[id] = estimate
+        }
+        if (kept.isEmpty()) return emptyMap()
+        // Back to the linear scale VolumeBalance works in, largest at 1.0.
+        val loudestDb = kept.values.max()
+        return kept.mapValues { (_, db) -> 10.0.pow((db - loudestDb) / 20.0) }
     }
 
     /** Middle value of [values] (mean of the two middle ones when there is an even number). */
@@ -1217,5 +1354,24 @@ class SyncCalibrator(
          *  The cost is runs that decline to balance, which is the right way to be wrong here: the
          *  levels are still logged, and the next run decides. */
         internal const val MIN_LEVEL_SAMPLES = 3
+
+        /** How far apart two captures' level readings for one client may sit and still count as the
+         *  same measurement, in dB of centred log level.
+         *
+         *  Tied to the decision it feeds, not chosen for comfort: [VolumeBalance.BALANCE_TOL_RATIO]
+         *  decides "even enough" at 1.25, which is 1.9 dB, so evidence whose own captures scatter by
+         *  more than a few dB cannot support a verdict at that granularity. Three is the point where
+         *  the rig's own history splits cleanly: runs B and C agreed to better than 0.5 dB, while
+         *  run A's two captures (1.23:1 against 2.63:1) sit 3.3 dB apart in this space and are
+         *  exactly the reading that must not be acted on. */
+        internal const val LEVEL_AGREEMENT_DB = 3.0
+
+        /** Below this the sign of a centred level is not evidence of anything, so the swap check
+         *  ignores it. A room that really is balanced sits at 0 dB and its captures will straddle
+         *  zero by noise alone; without a deadband that reads as a swap every time. 1 dB is half the
+         *  balance's own decision threshold, so nothing inside it could change an outcome anyway. */
+        internal const val LEVEL_SIGN_DEADBAND_DB = 1.0
+
+        private const val LN10 = 2.302585092994046
     }
 }

@@ -46,15 +46,67 @@ class LevelReductionTest {
     }
 
     @Test
-    fun `an odd capture is outvoted rather than averaged in`() {
-        // Two captures agree that b is half of a; one bad capture claims they are equal. A median
-        // over normalised values keeps the agreed answer.
+    fun `an odd capture makes the run decline rather than being outvoted`() {
+        // Two captures agree that b is half of a; one claims they are equal. The OLD reduction
+        // medianed these and wrote 0.5 with full confidence. It must now decline: only two captures
+        // agree, and MIN_LEVEL_SAMPLES of them have to.
+        //
+        // This is the gate being deliberately strict rather than a limitation. The pair path takes
+        // PROBE_REPEATS=3 captures, so on a two-speaker rig a single disagreeing capture stops the
+        // balance outright. That is the intended direction of error: the levels are still logged and
+        // the next run decides, whereas a wrong persistent volume is the user's to undo by hand.
         val cal = calibratorWith(
             mapOf("a" to 20.0, "b" to 10.0),
             mapOf("a" to 30.0, "b" to 15.0),
             mapOf("a" to 10.0, "b" to 10.0),
         )
-        assertEquals(0.5, cal.reduceLevels().getValue("b"), 1e-9)
+        assertTrue("b's captures do not agree, so b is not balanced", cal.reduceLevels().isEmpty())
+    }
+
+    @Test
+    fun `agreeing captures are reduced even when the room is far from even`() {
+        // The counterpart to the test above, and the case that must keep working: a real 10 dB room
+        // asymmetry, measured consistently, is exactly what the feature exists to correct. "Equal
+        // gains should read 1.00" is FALSE here - the mic sits beside one speaker and across the
+        // room from the other, so a large steady ratio is the expected reading, not a failure.
+        val cal = calibratorWith(
+            mapOf("near" to 1.00e-2, "far" to 0.31e-2),
+            mapOf("near" to 0.62e-2, "far" to 0.19e-2),
+            mapOf("near" to 1.40e-2, "far" to 0.44e-2),
+        )
+        val levels = cal.reduceLevels()
+        assertEquals(1.0, levels.getValue("near"), 1e-9)
+        assertEquals(0.31, levels.getValue("far"), 0.02)
+    }
+
+    @Test
+    fun `a swapped attribution is rejected on the sign flip it produces`() {
+        // Attribution can pair each client at the OTHER's arrival (a global drift estimate wrong by
+        // the 90 ms between refOff and tgtOff), and the estimator then reports the RECIPROCAL ratio
+        // with full confidence. Observed on-rig as 1.00/0.31 followed by 0.30/1.00 - one consistent
+        // measurement with the labels exchanged. A spread test alone might tolerate it; the sign of
+        // the centred level cannot, which is why the sign check is separate and fatal.
+        val cal = calibratorWith(
+            mapOf("a" to 1.00e-2, "b" to 0.31e-2),
+            mapOf("a" to 0.30e-2, "b" to 1.00e-2), // labels swapped
+            mapOf("a" to 1.00e-2, "b" to 0.34e-2),
+        )
+        assertTrue("a reciprocal reading must not be balanced on", cal.reduceLevels().isEmpty())
+    }
+
+    @Test
+    fun `noise around an even room does not read as a swap`() {
+        // The sign check has to survive the case it most easily mistakes: a genuinely balanced room
+        // sits at 0 dB, so its captures straddle zero by noise alone. Without the deadband every
+        // even room would be declined as a swap - the one false positive that matters.
+        val cal = calibratorWith(
+            mapOf("a" to 10.0, "b" to 10.4),
+            mapOf("a" to 10.3, "b" to 10.0),
+            mapOf("a" to 10.0, "b" to 10.2),
+        )
+        val levels = cal.reduceLevels()
+        assertTrue("an even room is still measured", levels.size == 2)
+        assertEquals("and reads as even", 1.0, levels.getValue("a") / levels.getValue("b"), 0.05)
     }
 
     @Test
@@ -76,18 +128,21 @@ class LevelReductionTest {
     }
 
     @Test
-    fun `one capture cannot be banked twice and outvote the others`() {
-        // The pair path re-pairs every baseline with every probe capture, so a baseline harvested
-        // per PAIRING rather than per CAPTURE would be counted N times and drag the median onto
-        // whatever that one capture happened to read. Here a single repeated capture disagrees with
-        // two others; duplicated three times it would win, counted once it cannot.
+    fun `a capture banked three times cannot manufacture agreement`() {
+        // The pair path re-pairs every baseline with every probe capture, so a level harvested per
+        // PAIRING rather than per CAPTURE would enter the list N times. Three copies of one capture
+        // agree with each other perfectly, so the agreement gate is no defence against this at all -
+        // it would clear MIN_LEVEL_SAMPLES on a single capture's evidence and read a zero spread as
+        // confidence. The `levelled` flag in calibratePair is what prevents it, and this test records
+        // that the reduction cannot: duplicates are indistinguishable from genuine repeats here.
         val odd = mapOf("a" to 10.0, "b" to 10.0) // claims the two are equal
-        val cal = calibratorWith(
-            odd,
-            mapOf("a" to 20.0, "b" to 10.0), // both of these say b is half of a
-            mapOf("a" to 30.0, "b" to 15.0),
+        val cal = calibratorWith(odd, odd, odd)
+        assertEquals(
+            "three copies of one capture look exactly like three agreeing captures to the reduction",
+            1.0,
+            cal.reduceLevels().getValue("b"),
+            1e-9,
         )
-        assertEquals("the odd capture must not be double-counted", 0.5, cal.reduceLevels().getValue("b"), 1e-9)
     }
 
     @Test
