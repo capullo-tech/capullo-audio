@@ -37,24 +37,6 @@ object VolumeBalance {
      *  and it would also fall under the calibration's own detection floor. */
     const val MIN_PERCENT = 15
 
-    /**
-     * How measured salience responds to gain: `measured ≈ percent^EXPONENT`. Fitted at roughly 0.6
-     * from the rig sweep (SW 12% → z≈13 against SW 100% → z≈34-56), i.e. salience rises much more
-     * slowly than the percentage.
-     *
-     * EMPIRICAL AND ROUGH, and now known to be fitted against the WRONG AXIS: the 0.6 was measured
-     * against `percent`, but percent is a base-10 exponential in amplitude (see [percentToAmplitude]),
-     * so this exponent is silently absorbing that curve along with whatever the room does. It is not
-     * an acoustic property and should not be read as one.
-     *
-     * Left as-is deliberately rather than re-derived on the spot: it only sets the STEP SIZE of a
-     * correction, never its direction or its fixed point, so an error here costs an extra iteration
-     * rather than a wrong answer — and the correction is now capped at [MAX_CORRECTION_DB] anyway,
-     * which bounds the cost of a bad step. Re-deriving it needs a sensitivity measurement that does
-     * not exist yet; doing it from the same rig data that produced 0.6 would just relabel the error.
-     */
-    const val LEVEL_EXPONENT = 0.6
-
     /** Fraction of the computed step actually applied per pass. Under-stepping converges from below
      *  instead of oscillating around the target, which matters because each measurement is noisy. */
     const val DAMPING = 0.7
@@ -96,8 +78,12 @@ object VolumeBalance {
      * commanded 50% expecting -6 dB and measured -12 dB would have read as an estimator wrong by
      * 6 dB — outside any sane pass band — and would have killed a working feature on a unit error.
      */
-    fun percentToAmplitude(percent: Int): Double =
-        ((10.0.pow(percent.coerceIn(0, 100) / 100.0) - 1.0) / 9.0).coerceIn(0.0, 1.0)
+    fun percentToAmplitude(percent: Int): Double = percentToAmplitude(percent.toDouble())
+
+    /** The same curve on a continuous axis. The intermediate arithmetic in [computeGains] lives on
+     *  the amplitude side and must not be forced through integer percentages on the way. */
+    private fun percentToAmplitude(percent: Double): Double =
+        ((10.0.pow(percent.coerceIn(0.0, 100.0) / 100.0) - 1.0) / 9.0).coerceIn(0.0, 1.0)
 
     /** Inverse of [percentToAmplitude]: the percentage that yields [amplitude]. */
     fun amplitudeToPercent(amplitude: Double): Double =
@@ -127,11 +113,24 @@ object VolumeBalance {
      * One pass of gains that should even the clients out at the mic, or null if there is nothing to
      * act on (fewer than two clients measured).
      *
-     * Each client's measurement tells us what it produces per unit of gain, so the gain that would
-     * put them all at a common level follows directly; the results are then scaled together so the
+     * The gain a client should be on follows directly from what it measured, because the curve from
+     * percentage to amplitude is KNOWN ([percentToAmplitude]): ask for the amplitude that lands this
+     * client on the target and convert it straight back. The results are then scaled together so the
      * loudest sits at [HEADROOM_PERCENT], which preserves the ratios while leaving room above.
      * Only a fraction [DAMPING] of each move is taken, because the measurement behind it is noisy
      * and converging from below beats hunting around the answer.
+     *
+     * **This used to model the response as `measured ≈ percent^0.6`, and that was a real defect
+     * rather than a rough edge.** The exponent was fitted against the percentage axis, which is
+     * itself a base-10 exponential in amplitude, so it was standing in for a curve this class
+     * already knows exactly. It also had the wrong SHAPE, not merely the wrong value: the true local
+     * elasticity of amplitude with respect to percentage runs about 1.4 at 30% to 2.2 at 80%, so
+     * every step came out roughly three times too small near the top of the range and the loop
+     * leaned on [MAX_CORRECTION_DB] and repeated passes to make up the shortfall. Simulating the
+     * loop against snapclient's real curve (`rig-loopsim.py`, `FINDINGS-loopsim-2026-08-07.md`) put
+     * corrections that leave the room MORE unbalanced at 607 per 2000 runs with the exponent and 57
+     * without it, with direction reversals falling from 25% of runs to 2%. Deleting the constant
+     * removes a fitted number; it does not add one.
      *
      * Undetected clients keep the gain they have: raising a speaker nobody measured would be
      * guessing, and it is the calibration's detectability boost that deals with those.
@@ -140,25 +139,32 @@ object VolumeBalance {
         val measured = clients.filter { (it.measuredLevel ?: 0.0) > 0.0 && it.gainPercent > 0 }
         if (measured.size < 2) return null
 
-        // What each client yields per unit gain, backing the gain law out of the measurement.
-        val efficiency = measured.associate { c ->
-            c.id to (c.measuredLevel!! / c.gainPercent.toDouble().pow(LEVEL_EXPONENT))
-        }
         // Aim at the QUIETEST client's current output: matching down rather than up keeps the room
         // quieter and stays inside the range every client actually has available.
         val target = measured.minOf { it.measuredLevel!! }
 
         val ideal = measured.associate { c ->
-            val want = (target / efficiency.getValue(c.id)).pow(1.0 / LEVEL_EXPONENT)
+            // Level is proportional to amplitude, so the amplitude that hits the target is just the
+            // current one scaled by how far off this client measured. No fitted constant anywhere.
+            val wantAmplitude = percentToAmplitude(c.gainPercent) * (target / c.measuredLevel!!)
+            val want = amplitudeToPercent(wantAmplitude)
             val damped = c.gainPercent + DAMPING * (want - c.gainPercent)
             c.id to damped.coerceIn(MIN_PERCENT.toDouble(), 100.0)
         }
         // Scale as a group so the loudest lands on the headroom cap: the ratios are the balance,
         // the absolute position is the user's to change afterwards.
-        val loudest = ideal.values.max()
-        val scale = if (loudest > 0) HEADROOM_PERCENT / loudest else 1.0
+        //
+        // ON THE AMPLITUDE AXIS, because that is the only axis where a common factor preserves the
+        // ratios this line claims to preserve. Multiplying the PERCENTAGES by a common factor, which
+        // is what this did before, distorts them: {30, 60} scaled to {40, 80} moves the pair from
+        // 9.53 dB apart to 10.91 dB apart, re-applied on every pass, in the same units the balance
+        // is trying to converge in.
+        val loudestAmplitude = ideal.values.maxOf { percentToAmplitude(it) }
+        val scale =
+            if (loudestAmplitude > 0) percentToAmplitude(HEADROOM_PERCENT) / loudestAmplitude else 1.0
         val startPercent = measured.associate { it.id to it.gainPercent }
         return ideal.mapValues { (id, g) ->
+            val scaled = amplitudeToPercent((percentToAmplitude(g) * scale).coerceAtMost(1.0))
             // CAP LAST, against the gain this client STARTED at, and after the group scaling rather
             // than before it: the scaling is itself a move the user will hear, so a cap applied to
             // the pre-scale figure would not bound what actually gets written. Clamping one client
@@ -174,7 +180,7 @@ object VolumeBalance {
             val hiAmp = startAmp * 10.0.pow(MAX_CORRECTION_DB / 20.0)
             val lo = amplitudeToPercent(loAmp)
             val hi = amplitudeToPercent(hiAmp)
-            (g * scale).coerceIn(lo, hi).roundToInt().coerceIn(MIN_PERCENT, HEADROOM_PERCENT)
+            scaled.coerceIn(lo, hi).roundToInt().coerceIn(MIN_PERCENT, HEADROOM_PERCENT)
         }
     }
 

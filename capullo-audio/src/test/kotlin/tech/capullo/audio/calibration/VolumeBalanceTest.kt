@@ -74,11 +74,17 @@ class VolumeBalanceTest {
 
     @Test
     fun `repeated passes converge rather than oscillate`() {
-        // Each measurement is noisy, so the step is damped. Simulate a room where measured level
-        // follows gain^0.6 and check the imbalance shrinks monotonically instead of hunting.
+        // Each measurement is noisy, so the step is damped. The room is modelled through the REAL
+        // snapclient curve - level is proportional to amplitude, which is what a speaker does - and
+        // the imbalance must shrink monotonically instead of hunting.
+        //
+        // This used to model the room as gain^0.6, matching the exponent the balance itself assumed.
+        // A control law graded against its own assumption cannot fail, which is how a step size that
+        // was ~3x too small near the top of the range survived: the test agreed with it.
         var gains = mapOf("near" to 80, "far" to 80)
         val efficiency = mapOf("near" to 3.0, "far" to 1.0) // near is 3x more efficient at the mic
-        fun measure(id: String) = efficiency.getValue(id) * Math.pow(gains.getValue(id).toDouble(), 0.6)
+        fun measure(id: String) =
+            efficiency.getValue(id) * VolumeBalance.percentToAmplitude(gains.getValue(id))
         var previousSpread = Double.MAX_VALUE
         repeat(6) {
             val spread = maxOf(measure("near"), measure("far")) / minOf(measure("near"), measure("far"))
@@ -89,8 +95,56 @@ class VolumeBalanceTest {
             ) ?: return@repeat
             gains = next
         }
+        // The exact law lands on the true fixed point rather than creeping toward it, so a 9.5 dB
+        // room ends genuinely even, not merely closer than it started.
         val finalSpread = maxOf(measure("near"), measure("far")) / minOf(measure("near"), measure("far"))
-        assertTrue("should end close to even, got ratio $finalSpread", finalSpread < 1.35)
+        assertTrue("should end even, got ratio $finalSpread from gains $gains", finalSpread < 1.05)
+    }
+
+    @Test
+    fun `the step is sized by the real gain curve, not by a fitted exponent`() {
+        // One client measures exactly twice the other, both at the same gain, so the correction the
+        // room needs is precisely 6 dB and no group scaling is involved (the quiet one is already
+        // the loudest ideal). DAMPING then takes 70% of that move.
+        //
+        // The old percent^0.6 law asked for 80% -> 25%, which is about 17 dB, and the answer only
+        // stayed sane because MAX_CORRECTION_DB clamped it back to the 6 dB cap. So a run correcting
+        // a mere 6 dB imbalance spent the ENTIRE blast-radius budget, every time. The exact law asks
+        // for the 6.0 dB that is actually needed and lands short of the cap, which is what leaves the
+        // cap free to do its real job of bounding a wrong measurement.
+        val start = 80
+        val g = VolumeBalance.computeGains(listOf(c("loud", start, 20.0), c("quiet", start, 10.0)))!!
+        val capFloor = VolumeBalance.amplitudeToPercent(
+            VolumeBalance.percentToAmplitude(start) * Math.pow(10.0, -VolumeBalance.MAX_CORRECTION_DB / 20.0),
+        )
+        assertEquals("the quiet client is already the target and must not move", start, g.getValue("quiet"))
+        assertTrue(
+            "a 6dB imbalance must not consume the whole cap (got ${g["loud"]}%, cap floor ${"%.1f".format(capFloor)}%)",
+            g.getValue("loud") > capFloor + 1.0,
+        )
+        // 70% of a 6.02 dB move, taken on the percentage axis where the damping is applied.
+        assertEquals(-4.2, movedDb(start, g.getValue("loud")), 0.3)
+    }
+
+    @Test
+    fun `only the ratio between measured levels reaches the output`() {
+        // The production caller does not pass raw correlation values: SyncCalibrator.reduceLevels
+        // hands over levels NORMALISED so the loudest is 1.0, while these tests pass whatever scale
+        // reads clearly. Both must give the same volumes, or the unit tests are pinning a function
+        // the calibrator never actually calls. The new law divides `target / measuredLevel`, so the
+        // scale cancels - this test is what keeps that true.
+        val raw = listOf(c("a", 62, 4.7e-2), c("b", 88, 1.1e-2))
+        val loudest = raw.maxOf { it.measuredLevel!! }
+        val normalised = raw.map { c(it.id, it.gainPercent, it.measuredLevel!! / loudest) }
+        assertEquals(
+            VolumeBalance.computeGains(raw),
+            VolumeBalance.computeGains(normalised),
+        )
+        // And an arbitrary rescale, to pin that 1.0 is not itself special.
+        assertEquals(
+            VolumeBalance.computeGains(raw),
+            VolumeBalance.computeGains(raw.map { c(it.id, it.gainPercent, it.measuredLevel!! * 137.0) }),
+        )
     }
 
     @Test
