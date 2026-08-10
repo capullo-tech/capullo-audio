@@ -308,9 +308,79 @@ object Dsp {
         return if (peak == Double.NEGATIVE_INFINITY) 0.0 else peak
     }
 
+    /** How far one source's arrivals spread: direct path plus the room's reflections of it.
+     *  Rig-measured at 50-80 ms indoors. Mirrors [PeakAttribution.SOURCE_SPREAD_MS], kept here so
+     *  the DSP layer does not depend on the matching layer. */
+    const val SOURCE_SPREAD_MS = 80.0
+
+    /**
+     * Peaks covering UP TO [sources] distinct sources, [perSource] peaks from each.
+     *
+     * **A plain top-N search cannot answer "where are the speakers".** A source arrives as a cluster
+     * — direct path plus reflections, spread 50-80 ms indoors — so with a few-ms guard the loudest
+     * speaker's own cluster supplies peak after peak and a top-N list is N views of ONE speaker.
+     * Measured on `dumps/pcm-20260806-195004`: the top SIX peaks span 1565-1657 ms and every one is
+     * the same source; the same holds in every probed capture of `sweep-124101.log` and
+     * `sweep-225432.log`. Clustering downstream ([PeakAttribution.clusterLeaders]) cannot rescue it,
+     * because it merges peaks that were REPORTED and cannot recover a speaker that never made the
+     * list. That is why the quiet speaker vanishes at iteration zero of a balance run.
+     *
+     * Two stages rather than simply widening the guard, because the two jobs conflict. A wide guard
+     * would return one peak per source but that peak would be the cluster's LOUDEST, which is often
+     * a reflection rather than the direct path — precisely the later-biased lag
+     * [PeakAttribution.clusterLeaders] exists to avoid. So: locate source regions with a
+     * source-width guard, then search inside each region with the fine guard, giving both coverage
+     * across sources and the direct path within one.
+     *
+     * The result is still ordered by salience, so callers that just want "the strongest peaks" are
+     * unaffected in the single-source case.
+     */
+    fun findPeaksPerSource(
+        r: DoubleArray,
+        fs: Int,
+        loMs: Int,
+        hiMs: Int,
+        sources: Int,
+        perSource: Int = 4,
+        guardMs: Double = 4.0,
+        spreadMs: Double = SOURCE_SPREAD_MS,
+    ): List<Peak> {
+        // Stage 1: one anchor per source region, separated by a whole source width.
+        val anchors = findPeaks(r, fs, loMs, hiMs, count = sources, guardMs = spreadMs)
+        // Stage 2: the fine structure around each anchor, which is where the direct path is.
+        //
+        // z MUST STAY SCORED AGAINST THE WHOLE RANGE. `findPeaks` divides by the median |value| of
+        // the range it is given, so calling it on a narrow window renormalises the floor against
+        // that window's own contents — which are dominated by the very arrival being measured. On
+        // `dumps/pcm-20260806-195004` that alone dropped the loud speaker's z from 16.6 to 6.9, i.e.
+        // below the detection floor, and would have made this fix look like it deleted both
+        // speakers. Compute the noise once, over the full range, and z-score against it.
+        val lo0 = (fs.toLong() * loMs / 1000).toInt().coerceIn(0, r.size - 1)
+        val hi0 = (fs.toLong() * hiMs / 1000).toInt().coerceIn(lo0 + 1, r.size)
+        val fullNoise = (lo0 until hi0).map { abs(r[it]) }.sorted()[(hi0 - lo0) / 2] + 1e-18
+
+        val out = LinkedHashMap<Double, Peak>() // by lag, so overlapping regions cannot double-count
+        for (a in anchors) {
+            val lo = (a.lagMs - spreadMs).toInt().coerceAtLeast(loMs)
+            val hi = (a.lagMs + spreadMs).toInt().coerceAtMost(hiMs)
+            if (hi <= lo) continue
+            for (p in findPeaks(r, fs, lo, hi, count = perSource, guardMs = guardMs)) {
+                // Re-score against the full-range floor: recover the raw value from the window's
+                // own normalisation, then divide by the noise every other caller uses.
+                val raw = levelAt(r, fs, p.lagMs, halfWindowMs = 0.5)
+                out.putIfAbsent(p.lagMs, Peak(p.lagMs, raw / fullNoise))
+            }
+        }
+        return out.values.sortedByDescending { it.z }
+    }
+
     /**
      * Top-[count] peaks of [r] in lag range [loMs]..[hiMs], each z-scored against the
      * median absolute value of that range and separated by at least [guardMs].
+     *
+     * Returns peaks, NOT sources: with the default guard several of these can be the same speaker's
+     * direct path and its reflections. Use [findPeaksPerSource] when the question is "where are the
+     * speakers", which is what every calibration caller actually wants.
      *
      * The z here is a DETECTION statistic — "is this lump distinguishable from the floor" — and is
      * used for exactly that plus ranking. It is NOT a level: see [levelAt] for why reading it as one

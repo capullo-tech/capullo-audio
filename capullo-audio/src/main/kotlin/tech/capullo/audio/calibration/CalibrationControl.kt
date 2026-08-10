@@ -23,11 +23,20 @@ interface CalibrationControl {
  * reference ring; a fake returns predetermined peaks.
  */
 interface Measurer {
-    /** Salient peaks of a full capture, or null if inconclusive after retry. */
-    suspend fun measure(peakCount: Int): List<Dsp.Peak>?
+    /**
+     * Salient peaks of a full capture, or null if inconclusive after retry.
+     *
+     * @param sources how many speakers are expected to be audible. With >0 the search covers each
+     *  source region separately, so one loud speaker's own reflections cannot fill the whole list
+     *  and hide the other speaker (see [Dsp.findPeaksPerSource]). 0 keeps the plain top-N search.
+     */
+    suspend fun measure(peakCount: Int, sources: Int = 0): List<Dsp.Peak>?
 
     /** Full-capture peaks plus each 6 s half's peaks (for the split-half gate), or null. */
-    suspend fun measureHalves(peakCount: Int): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>>?
+    suspend fun measureHalves(
+        peakCount: Int,
+        sources: Int = 0,
+    ): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>>?
 
     /**
      * A reader BOUND TO THE CAPTURE [measure] just returned: given a lag, how loud the arrival there

@@ -70,13 +70,23 @@ class OrchestrationTest {
             if (dropOnMeasureCall?.first == id && dropOnMeasureCall.second == callNo) null
             else Dsp.Peak(base - (control.latency[id] ?: 0), z.getValue(id))
         }
-        override suspend fun measure(peakCount: Int): List<Dsp.Peak>? {
+        /** [sources] is recorded rather than acted on: this fake renders one peak per client by
+         *  construction, so it has no cluster for the per-source search to matter to. The callers'
+         *  expectation that it matches the audible-client count is asserted in
+         *  `every measurement asks for as many sources as there are audible speakers`. */
+        var lastSources: Int? = null
+        override suspend fun measure(peakCount: Int, sources: Int): List<Dsp.Peak>? {
             measureCalls++
+            lastSources = sources
             val dead = (nullOnMeasureCall != null && measureCalls <= nullOnMeasureCall) ||
                 measureCalls in nullOnCalls
             return if (dead) null else peaks(measureCalls)
         }
-        override suspend fun measureHalves(peakCount: Int): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>> {
+        override suspend fun measureHalves(
+            peakCount: Int,
+            sources: Int,
+        ): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>> {
+            lastSources = sources
             val p = peaks(-1) // probe measurement; not counted against dropOnMeasureCall
             return Triple(p, p, p)
         }
@@ -126,6 +136,44 @@ class OrchestrationTest {
         assertEquals(150, control.latency["a"])
         assertEquals(220, control.latency["b"])
         assertNull("journal cleared after a completed run", journal.load())
+    }
+
+    @Test
+    fun `every measurement asks for as many sources as there are audible speakers`() = runTest {
+        // The per-source peak search only helps if the caller tells it how many speakers to expect;
+        // passing 0, or a stale count, silently restores the top-N behaviour where one loud
+        // speaker's reflections fill the whole list and the quiet one is never seen. That is a
+        // wiring mistake no acoustic assertion in this file would catch, because the fake renders
+        // exactly one peak per client and so cannot reproduce a cluster.
+        val control = FakeControl(mapOf("ref" to 0, "a" to 0, "b" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "a" to 1150.0, "b" to 1220.0),
+            z = mapOf("ref" to 40.0, "a" to 25.0, "b" to 20.0),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
+        )
+        cal.calibrate(clients("ref" to 0, "a" to 0, "b" to 0))
+        assertEquals("batch path: reference plus both targets are audible", 3, measurer.lastSources)
+
+        // The pair path runs with exactly two speakers audible (the others are muted).
+        val pairControl = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val pairMeasurer = SceneMeasurer(
+            pairControl,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1150.0),
+            z = mapOf("ref" to 40.0, "t" to 25.0),
+        )
+        SyncCalibrator(
+            tapArm = {},
+            control = pairControl,
+            readLatencies = { pairControl.latency.toMap() },
+            measurerFactory = { pairMeasurer },
+        ).calibrate(clients("ref" to 0, "t" to 0))
+        assertEquals("pair path: reference plus one target", 2, pairMeasurer.lastSources)
     }
 
     @Test

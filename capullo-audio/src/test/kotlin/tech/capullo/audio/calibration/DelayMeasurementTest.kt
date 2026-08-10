@@ -143,6 +143,100 @@ class DelayMeasurementTest {
         assertNull("quiet target 2 must be unmatched", res.matches[2])
     }
 
+    /**
+     * A REVERBERANT two-speaker room: each speaker arrives by its direct path and then again as
+     * reflections spread over the following ~70 ms, which is what a real room does (rig-measured at
+     * 50-80 ms). The near speaker is 12 dB louder at the mic, as when one client starts a balance
+     * run at a low gain.
+     *
+     * Every other scene in this file is anechoic — one impulse per speaker — and that is exactly why
+     * this defect survived every synthetic test: with no reflections a top-N search cannot spend its
+     * budget on one source, so the bug is invisible. Reflections are the whole point of the scene.
+     */
+    private fun reverberantScene(
+        nearMs: Int,
+        nearAmp: Float,
+        farMs: Int,
+        farAmp: Float,
+    ): Pair<ReferencePcmRing.Snapshot, MicCapture.Capture> {
+        val speakers = mutableListOf<Pair<Int, Float>>()
+        for ((delay, amp) in listOf(nearMs to nearAmp, farMs to farAmp)) {
+            speakers += delay to amp
+            // Reflections at +11..+68 ms, decaying — inside one SOURCE_SPREAD_MS window.
+            var a = amp
+            for (d in listOf(11, 23, 37, 52, 68)) {
+                a *= 0.72f
+                speakers += (delay + d) to a
+            }
+        }
+        return sceneN(speakers)
+    }
+
+    @Test
+    fun `the quiet speaker survives a reverberant room`() {
+        // THE ITERATION-ZERO CASE. A balance run deliberately starts one client low; if the search
+        // cannot see it, the run cannot correct it. 12 dB apart, both with full reflection tails.
+        val (snap, mic) = reverberantScene(nearMs = 1200, nearAmp = 0.8f, farMs = 1600, farAmp = 0.2f)
+
+        // What the pair path used to do: a plain top-N over the whole capture.
+        val topN = DelayMeasurement.estimateSpeakerDelays(snap, mic, peakCount = SyncCalibrator.PAIR_PEAKS)
+        val topNFar = topN.count { abs(it.lagMs - 1600.0) <= PeakAttribution.SOURCE_SPREAD_MS }
+
+        // What it does now: the budget is spread across the expected number of sources.
+        val perSource = DelayMeasurement.estimateSpeakerDelays(
+            snap,
+            mic,
+            peakCount = SyncCalibrator.PAIR_PEAKS,
+            sources = 2,
+        )
+        val near = perSource.filter { abs(it.lagMs - 1200.0) <= PeakAttribution.SOURCE_SPREAD_MS }
+        val far = perSource.filter { abs(it.lagMs - 1600.0) <= PeakAttribution.SOURCE_SPREAD_MS }
+
+        assertTrue(
+            "the per-source search must find the near speaker, got ${perSource.map { it.lagMs }}",
+            near.isNotEmpty(),
+        )
+        assertTrue(
+            "the per-source search must find the QUIET speaker at 1600ms, got " +
+                "${perSource.map { "%.0f(z=%.1f)".format(it.lagMs, it.z) }}",
+            far.isNotEmpty(),
+        )
+        // The direct path, not a reflection of it: reflections arrive later, never earlier.
+        assertEquals(1600.0, far.minOf { it.lagMs }, 8.0)
+        assertEquals(1200.0, near.minOf { it.lagMs }, 8.0)
+        // And it is a real improvement, not a no-op: state what the old search managed.
+        assertTrue(
+            "expected the per-source search to find at least as many views of the quiet speaker " +
+                "as the top-N search (top-N found $topNFar)",
+            far.size >= topNFar,
+        )
+    }
+
+    @Test
+    fun `an anechoic room is unchanged by the per-source search`() {
+        // The per-source path must not disturb the scenes the sync half already works on.
+        //
+        // Compared by SALIENCE ORDER, not by sorting the lags: a correlation has sidelobes either
+        // side of a real arrival (here at 1100 and 1150 ms, well clear of the z=9 floor), so the
+        // earliest salient peak is not the first speaker. Sorting by lag and comparing element 0
+        // compares whichever sidelobe each search happened to keep, which says nothing about
+        // whether the speakers were found.
+        val (snap, mic) = scene(delayAMs = 1200, delayBMs = 1250)
+        fun strongestTwo(sources: Int) =
+            DelayMeasurement.estimateSpeakerDelays(snap, mic, peakCount = 8, sources = sources)
+                .filter { it.z >= 9.0 }
+                .sortedByDescending { it.z }
+                .take(2)
+                .map { it.lagMs }
+                .sorted()
+        val plain = strongestTwo(0)
+        val perSource = strongestTwo(2)
+        assertEquals("both searches must recover the same two speakers", plain[0], perSource[0], 2.0)
+        assertEquals("both searches must recover the same two speakers", plain[1], perSource[1], 2.0)
+        assertEquals(1200.0, perSource[0], 2.0)
+        assertEquals(1250.0, perSource[1], 2.0)
+    }
+
     @Test
     fun `fft roundtrip is identity`() {
         val rnd = Random(1)

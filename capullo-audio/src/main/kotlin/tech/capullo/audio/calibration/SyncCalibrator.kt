@@ -74,8 +74,9 @@ class SyncCalibrator(
 
     /** The production measurer: records the mic and correlates against [ring]. */
     private fun micMeasurer(ring: ReferencePcmRing) = object : Measurer {
-        override suspend fun measure(peakCount: Int) = micMeasure(ring, peakCount)
-        override suspend fun measureHalves(peakCount: Int) = micMeasureHalves(ring, peakCount)
+        override suspend fun measure(peakCount: Int, sources: Int) = micMeasure(ring, peakCount, sources)
+        override suspend fun measureHalves(peakCount: Int, sources: Int) =
+            micMeasureHalves(ring, peakCount, sources)
         override fun levelReader(): ((Double) -> Double)? =
             lastMeasurement?.let { m -> { lag -> m.levelAt(lag) } }
     }
@@ -362,7 +363,7 @@ class SyncCalibrator(
         progress("measuring baseline (${reference.name} vs ${target.name})…")
         val baselines = mutableListOf<List<Dsp.Peak>>()
         repeat(PROBE_REPEATS) { attempt ->
-            measurer.measure(4)?.let { baselines += it }
+            measurer.measure(PAIR_PEAKS, sources = 2)?.let { baselines += it }
             if (attempt < PROBE_REPEATS - 1) progress("baseline capture ${attempt + 2}/$PROBE_REPEATS…")
         }
         if (baselines.isEmpty()) return failPair(target, "baseline measurement failed")
@@ -399,7 +400,7 @@ class SyncCalibrator(
         var lastAttr: PeakAttribution.Result? = null
         var refNotFound = false
         repeat(PROBE_REPEATS) { attempt ->
-            val probed = measurer.measure(4)
+            val probed = measurer.measure(PAIR_PEAKS, sources = 2)
             val probedLevel = measurer.levelReader()
             // One level sample per CAPTURE, not per baseline pairing: the N pairings of one probed
             // capture all read the same two lags, so counting them N times would just weight that
@@ -529,11 +530,12 @@ class SyncCalibrator(
         progress("applying ${newLatency}ms to ${target.name}, verifying…")
         control.sendSetLatency(target.id, newLatency) // transient — re-probed for verify below
         delay(SETTLE_MS)
-        val vBase = measurer.measure(4) ?: return failPair(target, "verify baseline failed")
+        val vBase = measurer.measure(PAIR_PEAKS, sources = 2)
+            ?: return failPair(target, "verify baseline failed")
         control.sendSetLatency(reference.id, reference.latencyMs - refOff)
         control.sendSetLatency(target.id, newLatency - tgtOff)
         delay(SETTLE_MS)
-        val vProbed = measurer.measure(4)
+        val vProbed = measurer.measure(PAIR_PEAKS, sources = 2)
         commitLatency(reference.id, reference.latencyMs) // remove reference probe
         if (vProbed == null) return failPair(target, "verify probe failed")
         // Assign reference and target to DISTINCT re-probed peaks (drift-corrected); the
@@ -600,7 +602,7 @@ class SyncCalibrator(
         try {
             batch@ do {
                 progress("measuring baseline (${sim.size + 1} speakers audible)…")
-                val baseline = measurer.measure(peakCount)
+                val baseline = measurer.measure(peakCount, sources = sim.size + 1)
                 if (baseline == null) {
                     // Nothing changed yet; a dead measurement means silence/stall, so
                     // fallback rounds would burn minutes failing the same way.
@@ -617,7 +619,7 @@ class SyncCalibrator(
                 sim.forEachIndexed { i, t -> control.sendSetLatency(t.id, t.latencyMs - targetOffset(i)) }
                 delay(SETTLE_MS)
                 // Halves of the probe capture drive the split-half consistency gate below.
-                val probedTriple = measurer.measureHalves(peakCount)
+                val probedTriple = measurer.measureHalves(peakCount, sources = sim.size + 1)
                 val probedLevel = measurer.levelReader()
                 if (probedTriple == null) {
                     commitLatency(reference.id, reference.latencyMs)
@@ -755,7 +757,7 @@ class SyncCalibrator(
                     control.sendSetLatency(c.client.id, c.client.latencyMs + c.deltaMs - c.offMs)
                 }
                 delay(SETTLE_MS)
-                val verify = measurer.measure(peakCount)
+                val verify = measurer.measure(peakCount, sources = sim.size + 1)
                 if (verify == null) {
                     toApply.forEach {
                         commitLatency(it.client.id, it.client.latencyMs)
@@ -898,12 +900,13 @@ class SyncCalibrator(
     private suspend fun micMeasureHalves(
         ring: ReferencePcmRing,
         peakCount: Int,
+        sources: Int = 0,
     ): Triple<List<Dsp.Peak>, List<Dsp.Peak>, List<Dsp.Peak>>? {
         repeat(2) { attempt ->
             val cap = mic!!.record(CAPTURE_MS)
             if (cap != null) {
                 val snap = ring.snapshot()
-                val full = DelayMeasurement.estimateSpeakerDelays(snap, cap, peakCount)
+                val full = DelayMeasurement.estimateSpeakerDelays(snap, cap, peakCount, sources)
                 Log.i(TAG, "peaks: " + full.joinToString { "%.1fms(z=%.1f)".format(it.lagMs, it.z) })
                 val salient = full.filter { it.z >= MIN_PEAK_Z }
                 if (salient.isNotEmpty()) {
@@ -911,8 +914,8 @@ class SyncCalibrator(
                     val c1 = MicCapture.Capture(cap.pcm.copyOfRange(0, h), cap.firstSampleNanos, cap.sampleRate)
                     val n2 = cap.firstSampleNanos + h.toLong() * 1_000_000_000L / cap.sampleRate
                     val c2 = MicCapture.Capture(cap.pcm.copyOfRange(h, cap.pcm.size), n2, cap.sampleRate)
-                    val p1 = DelayMeasurement.estimateSpeakerDelays(snap, c1, peakCount)
-                    val p2 = DelayMeasurement.estimateSpeakerDelays(snap, c2, peakCount)
+                    val p1 = DelayMeasurement.estimateSpeakerDelays(snap, c1, peakCount, sources)
+                    val p2 = DelayMeasurement.estimateSpeakerDelays(snap, c2, peakCount, sources)
                     return Triple(salient, p1, p2)
                 }
             }
@@ -924,12 +927,16 @@ class SyncCalibrator(
         return null
     }
 
-    private suspend fun micMeasure(ring: ReferencePcmRing, peakCount: Int = 4): List<Dsp.Peak>? {
+    private suspend fun micMeasure(
+        ring: ReferencePcmRing,
+        peakCount: Int = 4,
+        sources: Int = 0,
+    ): List<Dsp.Peak>? {
         repeat(2) { attempt ->
             val capture = mic!!.record(CAPTURE_MS)
             if (capture != null) {
                 val snapshot = ring.snapshot()
-                val m = DelayMeasurement.measure(snapshot, capture, peakCount)
+                val m = DelayMeasurement.measure(snapshot, capture, peakCount, sources)
                 lastMeasurement = m
                 val peaks = m?.peaks ?: emptyList()
                 Log.i(TAG, "peaks: " + peaks.joinToString { "%.1fms(z=%.1f)".format(it.lagMs, it.z) })
@@ -1237,6 +1244,18 @@ class SyncCalibrator(
             !consistent -> Gate.DEFERRED
             else -> Gate.APPLY
         }
+        /**
+         * Peak budget for the two-speaker pair path, split across the two sources by
+         * [Dsp.findPeaksPerSource] rather than spent on whichever speaker is loudest.
+         *
+         * Was a bare 4 for the whole capture, which is the same budget the batch path gives to a
+         * SINGLE source (`4 + 3*(n+1)` over n+1 speakers). With a source spreading its reflections
+         * over 50-80 ms, four peaks is roughly one speaker's cluster, so on this rig the pair path's
+         * list was six views of the loud speaker and the quiet one was absent — the iteration-zero
+         * failure of a balance run, where one client deliberately starts low.
+         */
+        internal const val PAIR_PEAKS = 8
+
         const val CAPTURE_MS = 12_000
 
         /** Pair-path verify: max post-correction target-vs-reference residual to accept.

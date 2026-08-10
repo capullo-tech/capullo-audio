@@ -39,7 +39,8 @@ object DelayMeasurement {
         ref: ReferencePcmRing.Snapshot,
         mic: MicCapture.Capture,
         peakCount: Int = 4,
-    ): List<Dsp.Peak> = measure(ref, mic, peakCount)?.peaks ?: emptyList()
+        sources: Int = 0,
+    ): List<Dsp.Peak> = measure(ref, mic, peakCount, sources)?.peaks ?: emptyList()
 
     /**
      * The two decimated arrays the correlation actually consumes, plus the indexing they need.
@@ -79,10 +80,16 @@ object DelayMeasurement {
         )
     }
 
+    /**
+     * @param sources how many SPEAKERS the caller expects to find. When >0 the peak search covers
+     *  each source region instead of returning a top-N list that one loud speaker's own cluster can
+     *  fill entirely (see [Dsp.findPeaksPerSource]). 0 keeps the plain top-N behaviour.
+     */
     fun measure(
         ref: ReferencePcmRing.Snapshot,
         mic: MicCapture.Capture,
         peakCount: Int = 4,
+        sources: Int = 0,
     ): Measurement? {
         val p = prepare(ref, mic) ?: return null
         val refD = p.refD
@@ -111,7 +118,20 @@ object DelayMeasurement {
         val delayedLevel = DoubleArray(span) { j -> rl[Math.floorMod(j - pre, rl.size)] }
         val spanMs = span * 1000 / fs
         return Measurement(
-            peaks = Dsp.findPeaks(delayed, fs, loMs = 0, hiMs = spanMs, count = peakCount),
+            peaks = if (sources > 0) {
+                Dsp.findPeaksPerSource(
+                    delayed,
+                    fs,
+                    loMs = 0,
+                    hiMs = spanMs,
+                    sources = sources,
+                    // Spread the budget across the sources rather than over the whole capture, so a
+                    // loud speaker cannot spend it on its own reflections.
+                    perSource = (peakCount / sources).coerceAtLeast(2),
+                )
+            } else {
+                Dsp.findPeaks(delayed, fs, loMs = 0, hiMs = spanMs, count = peakCount)
+            },
             levelCorrelation = delayedLevel,
             fs = fs,
             spanMs = spanMs,
