@@ -372,8 +372,24 @@ class SyncCalibrator(
         // both by DISPLACEMENT — same common-mode fix as the batch path. Electing the
         // reference as "the peak that stayed put" (the old v1 rule) can pick a fixed music
         // self-similarity ghost and bias the delta invisibly (seen on-rig 2026-07-22).
-        val refOff = PROBE_SET_MS[0]
-        val tgtOff = PROBE_SET_MS[1]
+        // WIDER OFFSETS WHEN LEVELS ARE BEING HARVESTED. Sync only needs the arrivals separated
+        // past the reflection spread ([PROBE_SET_MS], 90 ms gaps); levels need ~380 ms so the quiet
+        // arrival clears the loud speaker's reverb tail. Taking the wider set unconditionally would
+        // pay a 470 ms excursion on every sync-only run for nothing, so it is chosen by what this
+        // round is actually for. If the wider set is unavailable the round still calibrates sync and
+        // simply does not harvest — see [levelProbeSet].
+        val levelSet = if (harvestLevels) levelProbeSet(2) else null
+        val probeSet = levelSet ?: PROBE_SET_MS
+        val harvest = harvestLevels && levelSet != null
+        if (harvestLevels && levelSet == null) {
+            Log.i(
+                TAG,
+                "balance: not harvesting levels from this pair — no probe set separates 2 speakers " +
+                    "within the ${MAX_VERIFIED_PROBE_MS}ms verified write envelope",
+            )
+        }
+        val refOff = probeSet[0]
+        val tgtOff = probeSet[1]
         progress("probing ${reference.name} + ${target.name}…")
         control.sendSetLatency(reference.id, reference.latencyMs - refOff)
         control.sendSetLatency(target.id, target.latencyMs - tgtOff)
@@ -424,7 +440,7 @@ class SyncCalibrator(
                         // sit at their natural arrivals, which on a real rig can be a millisecond
                         // apart, so a baseline harvest would report two speakers as equal however
                         // different they are. Probing solves the separation problem for free.
-                        if (harvestLevels && !levelled) {
+                        if (harvest && !levelled) {
                             levelled = true
                             val rl = probedLevel?.invoke(r.probedLagMs)
                             val tl = probedLevel?.invoke(t.probedLagMs)
@@ -569,8 +585,25 @@ class SyncCalibrator(
         val overflow = targets.drop(PROBE_SET_MS.size - 1)
         // Room for every audible speaker's direct path plus a few reflections each.
         val peakCount = 4 + 3 * (sim.size + 1)
-        val refOffset = PROBE_SET_MS[0]
-        fun targetOffset(i: Int) = PROBE_SET_MS[i + 1]
+        // As in the pair path: levels need far wider separation than attribution does, so the batch
+        // takes the level set when one exists for this many speakers and the sync set otherwise.
+        // At three speakers the level set needs a 940 ms excursion, which is past the verified write
+        // envelope, so [levelProbeSet] declines and the batch calibrates sync without harvesting —
+        // the balance then has no level captures and simply does not act, which is the correct
+        // outcome rather than acting on tail-contaminated readings.
+        val levelSet = levelProbeSet(sim.size + 1)
+        val probeSet = levelSet ?: PROBE_SET_MS
+        val harvestLevels = levelSet != null
+        if (!harvestLevels) {
+            Log.i(
+                TAG,
+                "balance: not harvesting levels — ${sim.size + 1} speakers cannot be separated by " +
+                    "the ~380ms the level readout needs within the ${MAX_VERIFIED_PROBE_MS}ms " +
+                    "verified write envelope; sync is unaffected",
+            )
+        }
+        val refOffset = probeSet[0]
+        fun targetOffset(i: Int) = probeSet[i + 1]
 
         val outcomes = LinkedHashMap<String, String>() // client id -> summary line
         val succeeded = mutableSetOf<String>()
@@ -629,7 +662,7 @@ class SyncCalibrator(
                 }
                 val (probed, probedH1, probedH2) = probedTriple
 
-                val probesMs = PROBE_SET_MS.take(sim.size + 1) // [0]=reference, [1..]=targets
+                val probesMs = probeSet.take(sim.size + 1) // [0]=reference, [1..]=targets
                 val attr = PeakAttribution.attribute(baseline, probed, probesMs, MATCH_TOL_MS)
                 // The reference is never corrected; remove its probe now that it is measured.
                 commitLatency(reference.id, reference.latencyMs)
@@ -661,12 +694,17 @@ class SyncCalibrator(
                 // describes their loudness.
                 val boosted = preBoost.map { it.id }.toSet()
                 val probedLevels = mutableMapOf<String, Double>()
-                for (i in -1 until sim.size) {
-                    val client = if (i < 0) reference else sim[i]
-                    val m = attr.matches[i + 1] ?: continue
-                    if (client.id in boosted) continue
-                    probedLevel?.invoke(m.probedLagMs)?.takeIf { it > 0.0 }
-                        ?.let { probedLevels[client.id] = it }
+                // Only when the probe set actually separated the arrivals far enough for the level
+                // readout to mean anything; otherwise every value here would be the loud speaker's
+                // tail read at the quiet speaker's lag.
+                if (harvestLevels) {
+                    for (i in -1 until sim.size) {
+                        val client = if (i < 0) reference else sim[i]
+                        val m = attr.matches[i + 1] ?: continue
+                        if (client.id in boosted) continue
+                        probedLevel?.invoke(m.probedLagMs)?.takeIf { it > 0.0 }
+                            ?.let { probedLevels[client.id] = it }
+                    }
                 }
                 if (probedLevels.size >= 2) {
                     // Same provenance line as the pair path: matched lag and raw value per client,
@@ -1278,8 +1316,64 @@ class SyncCalibrator(
          * degrade to pair rounds. Correctness over capacity — a bigger batch is worthless if its
          * attributions are ambiguous. Max offset 360 ms stays below the old 390 ms, so the
          * stream-hiccup risk of a large latency step does not get worse.
+         *
+         * THIS SET IS FOR SYNC AND IS DELIBERATELY NOT WIDE ENOUGH FOR LEVELS. See
+         * [LEVEL_PROBE_SET_MS] — the two halves need different separations, and trying to satisfy
+         * both with one set is what made the three-client case look impossible.
          */
         val PROBE_SET_MS = listOf(90, 180, 360)
+
+        /**
+         * Probe offsets when a capture also has to yield LEVELS, which needs far more separation
+         * than attribution does.
+         *
+         * **Two different constraints on two different quantities, and conflating them is what
+         * blocked this.** Attribution needs every value in (offsets ∪ pairwise differences) distinct
+         * and separated by more than the room's 50-80 ms reflection spread — [PROBE_SET_MS] does
+         * that with 90 ms gaps and is rig-validated. Levels need each PAIR of compared arrivals
+         * separated by ~380 ms, because [Dsp.levelAt] reads a max over ±3 ms with no notion of a
+         * baseline, so a quieter arrival any closer parks on the louder speaker's decaying reverb
+         * tail and stops responding to its own gain (FINDINGS §15-16, §20). The tail decays about
+         * 5.4 dB/100 ms, so 380 ms puts the quiet arrival 13-15 dB clear.
+         *
+         * The level constraint binds only PAIRWISE DIFFERENCES; the attribution constraint binds the
+         * whole union. They do not scale alike, which is why "a Sidon set with 380 ms gaps" reads as
+         * needing a ~1000 ms member and looks impossible, while the real minimum for two clients is
+         * 470 ms and for three is 940 ms.
+         *
+         * Only as many offsets as the run needs are ever written ([levelProbeSet]), so the common
+         * two-client case pays 470 ms and nothing more. 470 ms is inside the envelope already
+         * verified on hardware: a direct RPC test wrote −380 ms on Guer and −479 ms on the ONEPLUS
+         * and read both back unchanged, no clamping (FINDINGS §20). The three-client 940 ms member
+         * has NOT been tried and may rebuffer — [levelProbeSet] refuses it rather than guessing.
+         */
+        val LEVEL_PROBE_SET_MS = listOf(90, 470, 940)
+
+        /**
+         * The largest probe excursion verified on hardware to be written and read back unchanged.
+         *
+         * A probe writes `latency − offset`, so a client already sitting at a negative latency pays
+         * more than the offset itself: the ONEPLUS at −99 ms took −479 ms for a 380 ms probe. Beyond
+         * this nothing is known — snapclient might clamp (which reads as a measurement failure, not
+         * a write one) or the stream might rebuffer. Levels are declined rather than harvested from
+         * a capture whose probe was never proven to land.
+         */
+        const val MAX_VERIFIED_PROBE_MS = 480
+
+        /**
+         * Level-harvesting probe offsets for [n] audible speakers, or null if this many cannot be
+         * separated inside [MAX_VERIFIED_PROBE_MS].
+         *
+         * Returning null is a real answer: the run still calibrates SYNC with [PROBE_SET_MS] and
+         * simply does not harvest levels, which is strictly better than harvesting levels that the
+         * tail makes meaningless. Three speakers need a 940 ms excursion — untried, plausibly enough
+         * to rebuffer — so this declines until that is measured rather than shipping a guess.
+         */
+        fun levelProbeSet(n: Int): List<Int>? {
+            if (n < 2 || n > LEVEL_PROBE_SET_MS.size) return null
+            val set = LEVEL_PROBE_SET_MS.take(n)
+            return if (set.max() <= MAX_VERIFIED_PROBE_MS) set else null
+        }
 
         private const val WEB_CLIENT_PREFIX = "qcweb-"
 
