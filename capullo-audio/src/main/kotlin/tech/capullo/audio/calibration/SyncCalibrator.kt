@@ -77,8 +77,21 @@ class SyncCalibrator(
         override suspend fun measure(peakCount: Int, sources: Int) = micMeasure(ring, peakCount, sources)
         override suspend fun measureHalves(peakCount: Int, sources: Int) =
             micMeasureHalves(ring, peakCount, sources)
+        // LEVELS ARE READ WITH A LOCAL SEARCH, not at a point. The lag a round knows an arrival by
+        // carries 10-70 ms of uncertainty once a speaker is more than a few dB down (rig
+        // 2026-08-11: the same quiet speaker matched 74 ms apart in consecutive captures), and a
+        // ±3 ms point read at a lag that far off lands on nothing — which is how a 12 dB lopsided
+        // room came to be reported as "already even". A window wide enough to contain that
+        // uncertainty but far narrower than the 380 ms probe separation finds the arrival without
+        // ever reaching the other speaker. This is exactly what makes the offline grader
+        // trustworthy at this imbalance (it tracked a commanded 12.4 dB step to 0.08 dB while a
+        // blind search could not locate the quiet speaker at all). Both clients get the same
+        // treatment, so the RATIO — the only thing the balance uses — stays honest.
         override fun levelReader(): ((Double) -> Double)? =
-            lastMeasurement?.let { m -> { lag -> m.levelAt(lag) } }
+            lastMeasurement?.let { m -> { lag -> Dsp.levelAt(m.levelCorrelation, m.fs, lag, LEVEL_READ_HALF_MS) } }
+        override fun timingReader(): ((Double, Double) -> Dsp.Peak?)? =
+            lastMeasurement?.let { m -> { lag, tol -> m.timingPeakNear(lag, tol) } }
+        override fun fullPeaks(): List<Dsp.Peak>? = lastMeasurement?.peaks
     }
 
     data class CalClient(
@@ -125,6 +138,22 @@ class SyncCalibrator(
      *  cannot see at all — so it would read as a genuinely loud speaker and get attenuated for it. */
     private val levelCaptures = mutableListOf<Map<String, Double>>()
 
+    /**
+     * Per level capture, whether its GEOMETRY looked wrong — parallel to [levelCaptures].
+     *
+     * A genuine attribution swap and ordinary level noise look identical if you only inspect
+     * levels, which is all the sign gate used to do. They do NOT look identical in the lags: a
+     * swap exchanges which arrival each speaker was read at, so the pair's measured separation
+     * departs from the round's consensus spacing by about twice the probe difference, while noise
+     * leaves the separation intact and moves only the value. Recording the geometry per capture
+     * lets the gate tell "this run may contain a swap" from "this run is noisy near balance".
+     *
+     * Rig 2026-08-13: one capture of five reported the opposite sign, and its lags (1264.4 /
+     * 1651.4 ms, separation 387) matched the rest of the round (1267.3 / 1643.3, separation 377)
+     * almost exactly — noise, not a swap, yet the whole run was declined as a suspected swap.
+     */
+    private val levelCaptureSwapSuspect = mutableListOf<Boolean>()
+
 
     /** A FINAL latency write (commit or restore) — records it for run-level read-back.
      *  Transient probe writes use [control].sendSetLatency directly and are not recorded. */
@@ -169,6 +198,7 @@ class SyncCalibrator(
         }
         intended.clear()
         levelCaptures.clear()
+        levelCaptureSwapSuspect.clear()
         val ring = ReferencePcmRing()
         val measurer = measurerFactory?.invoke(ring) ?: micMeasurer(ring)
         // Journal every client's pre-run latency AND volume BEFORE the first mutating write, so
@@ -362,8 +392,16 @@ class SyncCalibrator(
         // inherited the same error. The noise is drawn once per run, before probing starts.
         progress("measuring baseline (${reference.name} vs ${target.name})…")
         val baselines = mutableListOf<List<Dsp.Peak>>()
+        // The UNFILTERED peaks of each baseline, kept for the reference rescue's window anchors.
+        // When the speakers are far apart at the mic the quiet one is sub-salient in the baseline
+        // too (rig 2026-08-10 21:32: reference region z 6.4-8.3, deleted by the z≥9 filter), so
+        // the salient leaders alone leave the rescue nowhere to anchor.
+        val baselineFull = mutableListOf<List<Dsp.Peak>>()
         repeat(PROBE_REPEATS) { attempt ->
-            measurer.measure(PAIR_PEAKS, sources = 2)?.let { baselines += it }
+            measurer.measure(PAIR_PEAKS, sources = 2)?.let {
+                baselines += it
+                baselineFull += measurer.fullPeaks() ?: it
+            }
             if (attempt < PROBE_REPEATS - 1) progress("baseline capture ${attempt + 2}/$PROBE_REPEATS…")
         }
         if (baselines.isEmpty()) return failPair(target, "baseline measurement failed")
@@ -415,9 +453,77 @@ class SyncCalibrator(
         val samples = mutableListOf<Pair<Int, Double>>() // delta -> weight
         var lastAttr: PeakAttribution.Result? = null
         var refNotFound = false
-        repeat(PROBE_REPEATS) { attempt ->
+        // TARGETED REFERENCE RESCUE, collected while iterating and adjudicated after the loop.
+        //
+        // Measured on this rig (replayed offline from the 2026-08-10 20:04 failing run and four PCM
+        // dumps): in a two-speaker capture a PHAT peak carries only its source's share of the
+        // energy, so a reference that reads z≈12 solo reads z≈6-9 beside a sibling — under
+        // MIN_PEAK_Z — and the blind per-source search can spend its second anchor on the loud
+        // speaker's 84-127 ms reflection tail instead. The reference then never reaches attribution
+        // at all: in all nine baseline×probe pairings of the failing run the +[refOff] shift had NO
+        // candidate within tolerance (residuals 301-466 ms), while the target matched every time.
+        // Its position is still pinned by geometry — baseline leader + [refOff] + drift — so when
+        // blind attribution finds the target but not the reference, the whitened correlation is
+        // read directly at that window instead of declaring the reference missing.
+        //
+        // A single window read cannot be trusted alone: true arrivals measured z 6.5-9.0 against
+        // ±15 ms noise-window maxima of p95 5.1-6.0, an overlap. What separates them is that a real
+        // reference RECURS: the within-capture spacing target−reference is common-mode clean (the
+        // whole timeline wobbles ±10-20 ms between captures, but both speakers wobble together), so
+        // rescue is accepted only when the spacing agrees across probe captures. Window noise peaks
+        // land at a fresh lag every capture and cannot fake that.
+        data class RefRescue(
+            val capture: Int,
+            val spacingMs: Double, // target probed lag − rescued reference lag (wobble-free)
+            val refLagMs: Double,
+            val z: Double,
+            val deltaMs: Int,
+            val weight: Double,
+            val tgtZ: Double,
+            val read: ((Double) -> Double)?,
+            val peak: ((Double, Double) -> Dsp.Peak?)?,
+        )
+        val rescues = mutableListOf<RefRescue>()
+        /** Probe captures that already produced a level candidate. */
+        val levelledCaptures = mutableSetOf<Int>()
+
+        /**
+         * One capture's raw material for a level pair: the reader bound to that capture plus the
+         * two arrivals as this capture SAW them. Levels are not read here — see the pinned harvest
+         * after the consensus delta, which is what makes a quiet speaker measurable at all.
+         */
+        data class LevelCand(
+            val capture: Int,
+            val read: (Double) -> Double,
+            /** Locates the actual correlation peak near a lag, so BOTH arrivals can be read at a
+             *  peak of their own signal rather than one at a peak and one at a derived position. */
+            val peak: ((Double, Double) -> Dsp.Peak?)?,
+            val refLagMs: Double,
+            val tgtLagMs: Double,
+            val refZ: Double,
+            val tgtZ: Double,
+        )
+        val levelCands = mutableListOf<LevelCand>()
+        // HARVEST ROUNDS TAKE TWICE THE CAPTURES, because the level estimator is far noisier per
+        // capture than the sync estimator and the balance is the thing being starved.
+        //
+        // Two independent measurements agree on the number. The project's own solo sweep
+        // (2026-08-07) put the spread at a FIXED gain at 8.29 dB and concluded that 5-6 captures
+        // averaged are needed to reach 0.5 dB. Reproduced 2026-08-11 in the simplest possible
+        // configuration — one speaker playing alone, gain untouched, no attribution involved — where
+        // consecutive captures read 8-13 dB apart. The estimator is not broken; it is noisy, and
+        // the remedy is arithmetic rather than cleverness.
+        //
+        // Against that, the three runs of 2026-08-11 yielded 3, 1 and 4 usable level captures from
+        // 4 probes (attribution does not succeed on every capture, and a run whose sync lands in
+        // the deadband returns before the verify harvest). Six probes at the observed ~65 % yield
+        // lands around 4 usable plus the verify capture, which reaches the 5-6 the estimator needs.
+        // Sync-only rounds are unaffected and keep paying 3.
+        val probeRepeats = if (harvest) PROBE_REPEATS * 2 else PROBE_REPEATS
+        repeat(probeRepeats) { attempt ->
             val probed = measurer.measure(PAIR_PEAKS, sources = 2)
             val probedLevel = measurer.levelReader()
+            val probedTiming = measurer.timingReader()
             // One level sample per CAPTURE, not per baseline pairing: the N pairings of one probed
             // capture all read the same two lags, so counting them N times would just weight that
             // capture N-fold in the median.
@@ -429,6 +535,37 @@ class SyncCalibrator(
                     val r = a.matches[0]
                     val t = a.matches[1]
                     if (r == null) refNotFound = true
+                    if (r == null && t != null && probedTiming != null) {
+                        // The target anchors this capture: its own residual carries the capture's
+                        // drift, and every baseline leader OUTSIDE the target's cluster — taken
+                        // from the FULL pre-filter list, because the masked reference is usually
+                        // sub-salient in the baseline as well — is a candidate origin for the
+                        // reference. Read the probed correlation at leader + refOff and keep the
+                        // strongest window peak as this pairing's rescue candidate. Anchors still
+                        // need z ≥ RESCUE_MIN_Z: below that the "origin" is indistinguishable
+                        // from the correlation floor and every lag would open a window.
+                        val cand = PeakAttribution.clusterLeaders(baselineFull[bi])
+                            .filter {
+                                it.z >= RESCUE_MIN_Z &&
+                                    abs(it.lagMs - t.baselineLagMs) > PeakAttribution.CLUSTER_MS
+                            }
+                            .mapNotNull { b -> probedTiming(b.lagMs + refOff + a.driftMs, MATCH_TOL_MS) }
+                            .maxByOrNull { it.z }
+                        if (cand != null && cand.z >= RESCUE_MIN_Z) {
+                            val baseZ = base.maxOfOrNull { it.z } ?: 0.0
+                            rescues += RefRescue(
+                                capture = attempt,
+                                spacingMs = t.probedLagMs - cand.lagMs,
+                                refLagMs = cand.lagMs,
+                                z = cand.z,
+                                deltaMs = ((t.probedLagMs - tgtOff) - (cand.lagMs - refOff)).roundToInt(),
+                                weight = minOf(baseZ, cand.z, t.z),
+                                tgtZ = t.z,
+                                read = probedLevel,
+                                peak = probedTiming,
+                            )
+                        }
+                    }
                     if (r != null && t != null) {
                         val delta = ((t.probedLagMs - tgtOff) - (r.probedLagMs - refOff)).roundToInt()
                         val baseZ = base.maxOfOrNull { it.z } ?: 0.0
@@ -440,49 +577,88 @@ class SyncCalibrator(
                         // sit at their natural arrivals, which on a real rig can be a millisecond
                         // apart, so a baseline harvest would report two speakers as equal however
                         // different they are. Probing solves the separation problem for free.
-                        if (harvest && !levelled) {
+                        if (harvest && !levelled && probedLevel != null) {
                             levelled = true
-                            val rl = probedLevel?.invoke(r.probedLagMs)
-                            val tl = probedLevel?.invoke(t.probedLagMs)
-                            // LOG THE WHOLE PROVENANCE OF THE LEVEL PAIR, not just the numbers. A
-                            // swapped attribution (drift wrong by the 90 ms between refOff and
-                            // tgtOff) reports the reciprocal ratio with full confidence, and the
-                            // only way to see that in a log rather than infer it a week later is to
-                            // have the two lags, the two raw values, the dB between them and the
-                            // drift on one line. Both lags in particular: a swap is visible as the
-                            // reference sitting at the target's arrival, and no reduced number can
-                            // show that.
-                            Log.i(
-                                TAG,
-                                "level capture ${levelCaptures.size}: " +
-                                    "${reference.name}@%.1fms=%.3e ".format(r.probedLagMs, rl ?: 0.0) +
-                                    "${target.name}@%.1fms=%.3e ".format(t.probedLagMs, tl ?: 0.0) +
-                                    "delta=%+.1fdB drift=%.1fms base=$bi".format(
-                                        if (rl != null && tl != null && rl > 0.0 && tl > 0.0) {
-                                            20.0 * log10(tl / rl)
-                                        } else {
-                                            0.0
-                                        },
-                                        a.driftMs,
-                                    ),
+                            levelledCaptures += attempt
+                            levelCands += LevelCand(
+                                attempt, probedLevel, probedTiming,
+                                r.probedLagMs, t.probedLagMs, r.z, t.z,
                             )
-                            if (rl != null && tl != null && rl > 0.0 && tl > 0.0) {
-                                levelCaptures += mapOf(reference.id to rl, target.id to tl)
-                            }
                         }
                     }
                 }
             }
-            if (attempt < PROBE_REPEATS - 1) progress("probe capture ${attempt + 2}/$PROBE_REPEATS…")
+            if (attempt < probeRepeats - 1) progress("probe capture ${attempt + 2}/$probeRepeats…")
         }
         commitLatency(reference.id, reference.latencyMs) // reference is never corrected
+        // MASKING IS PER-CAPTURE, so adjudicate rescues whenever there are any — not only when the
+        // whole round failed. Rig 2026-08-11 01:36: captures 1 and 4 attributed blind while 2 and 3
+        // lost the reference entirely, and gating the rescue on "nothing attributed" silently threw
+        // the other two away, leaving the balance one capture short of MIN_LEVEL_SAMPLES.
+        //
+        // Rescued captures contribute LEVELS (the starved quantity) always, but contribute a sync
+        // DELTA only when blind attribution produced none: the blind samples are the more
+        // trustworthy evidence for the correction that actually gets written, and this keeps the
+        // proven sync path exactly as it was.
+        val hadBlindSamples = samples.isNotEmpty()
+        if (rescues.isNotEmpty()) {
+            // Adjudicate the rescue: the modal spacing group must span at least
+            // RESCUE_MIN_CAPTURES distinct probe captures. One capture's agreement with itself
+            // (several baselines pairing the same probed capture) proves nothing — the same noise
+            // peak would be read each time — so the quorum counts CAPTURES, not candidates.
+            // The quorum SCALES WITH THE NUMBER OF CAPTURES. "At least k of n agree within a
+            // window" gets easier to satisfy by chance as n grows — with a ±15 ms window and a
+            // 5 ms agreement band there are n(n−1)/2 chances for two noise reads to coincide, so a
+            // fixed k=2 that was safe at 3 captures is not safe at 6. Caught by the adversarial
+            // noise test the moment harvest rounds doubled their captures: window noise elected a
+            // reference and produced a 26 ms "correction" out of nothing.
+            val quorum = maxOf(RESCUE_MIN_CAPTURES, (probeRepeats + 2) / 3 + 1)
+            val group = rescues
+                .map { c -> rescues.filter { abs(it.spacingMs - c.spacingMs) <= RESCUE_AGREE_MS } }
+                .maxByOrNull { g -> g.distinctBy { it.capture }.size }
+                ?.takeIf { g -> g.distinctBy { it.capture }.size >= quorum }
+            if (group != null) {
+                Log.i(
+                    TAG,
+                    "reference ${reference.name} rescued at its expected probe position: " +
+                        group.joinToString {
+                            "cap${it.capture}@%.1fms(z=%.1f, spacing %.1fms)".format(it.refLagMs, it.z, it.spacingMs)
+                        },
+                )
+                if (!hadBlindSamples) for (c in group) samples += c.deltaMs to c.weight
+                if (harvest) {
+                    // Never twice from one capture: a capture that already produced a candidate
+                    // reads the same two lags of the same audio.
+                    for (c in group.distinctBy { it.capture }.filter { it.capture !in levelledCaptures }) {
+                        val read = c.read ?: continue
+                        levelledCaptures += c.capture
+                        levelCands += LevelCand(
+                            c.capture,
+                            read,
+                            c.peak,
+                            c.refLagMs,
+                            c.refLagMs + c.spacingMs,
+                            c.z,
+                            c.tgtZ,
+                        )
+                    }
+                }
+            }
+        }
         if (samples.isEmpty()) {
             return if (refNotFound) {
+                // NOT "too quiet or too far": both speakers on this rig measure well above the
+                // solo detection floor (verified 2026-08-10). In a shared capture the reference's
+                // correlation share sits below the salience floor and the targeted rescue found no
+                // spacing-consistent arrival either. Raising volumes does not help — it lifts the
+                // other speaker's reflections too.
                 failPair(
                     target,
-                    "reference speaker ${reference.name} was not detected — it is probably too quiet " +
-                        "or too far from this phone; raise its volume and re-run " +
-                        "(timeline drift ${lastAttr?.driftMs?.roundToInt() ?: 0}ms)",
+                    "reference speaker ${reference.name} was not found at its expected probe " +
+                        "position (baseline+${refOff}ms) — it is masked below the shared-capture " +
+                        "correlation floor. Its solo level is fine; do not raise volumes. " +
+                        "(rescue candidates=${rescues.size}, timeline drift " +
+                        "${lastAttr?.driftMs?.roundToInt() ?: 0}ms)",
                 )
             } else {
                 failPair(target, "target peak did not move by the probe")
@@ -500,6 +676,73 @@ class SyncCalibrator(
             "pair ${reference.name}/${target.name}: delta=${deltaMs}ms " +
                 "latency ${target.latencyMs} -> $newLatency",
         )
+        // PINNED LEVEL HARVEST — read each capture at ONE searched lag and one DERIVED lag.
+        //
+        // Reading both arrivals where each capture happened to match them is what broke the
+        // balance on a genuinely lopsided room (rig 2026-08-11 01:54, ONEPLUS 12.4 dB down): the
+        // quiet speaker's peak cannot be located reliably capture to capture — it was matched at
+        // 1765.9 ms in one and 1691.8 ms in the next, 74 ms apart — and a level read at the wrong
+        // lag is a wrong level. The two captures reported −8.7 dB and −1.2 dB for a room an
+        // independent capture measured at −7.23 dB, so the agreement gate declined, correctly and
+        // uselessly.
+        //
+        // The geometry is already known better than any single capture knows it: within one
+        // capture the two arrivals are separated by (tgtOff − refOff) + the consensus delta, which
+        // is the median of every sample this round took. So anchor on whichever arrival that
+        // capture saw MORE SALIENTLY — the loud speaker, whose peak is never in doubt — and derive
+        // the other from the consensus spacing. This is exactly the pinned-lag method that made
+        // the offline grader trustworthy at this imbalance (`scratchpad/grade.py`, which tracked a
+        // commanded 12.4 dB step to 0.08 dB while a blind top-2 search could not find the quiet
+        // speaker at all).
+        //
+        // `levelAt` still takes its max over ±3 ms, so a small per-capture wobble is absorbed
+        // without letting the read wander onto a neighbouring arrival.
+        if (harvest) {
+            val spacingMs = (tgtOff - refOff) + deltaMs
+            for (c in levelCands.sortedBy { it.capture }) {
+                val anchorOnRef = c.refZ >= c.tgtZ
+                val refSeed = if (anchorOnRef) c.refLagMs else c.tgtLagMs - spacingMs
+                val tgtSeed = if (anchorOnRef) c.refLagMs + spacingMs else c.tgtLagMs
+                // SYMMETRIC SELECTION. Both arrivals are re-located as the peak of their own
+                // correlation before their level is read, even though one of the two seeds is
+                // already a matched peak.
+                //
+                // Otherwise the anchor is read at a lag that was CHOSEN by maximising that
+                // speaker's own signal while the other is read at a merely derived lag, and a
+                // selected maximum is biased upward. The ratio then inflates whichever speaker
+                // anchored, and the balance duly attenuates it. Rig-measured 2026-08-11 iteration
+                // 1: ONEPLUS anchored in all six captures, its readings varied 2.1x (5.4-11.5e-05)
+                // while the derived PFFM10 stayed inside 3.5-4.9e-05, the ratio over-read by
+                // 2.6 dB against an independent solo measurement, and two runs walked the speaker
+                // 3.7 dB past even. Same family as the settled "a peak's z is not a level" trap:
+                // select a maximum, then read its value, and the selection is in the answer.
+                val refLag = c.peak?.invoke(refSeed, LEVEL_PEAK_FIND_MS)?.lagMs ?: refSeed
+                val tgtLag = c.peak?.invoke(tgtSeed, LEVEL_PEAK_FIND_MS)?.lagMs ?: tgtSeed
+                // Geometry check, on the SEEDS (what this capture actually matched) rather than
+                // on the derived pair, which is consistent by construction and so proves nothing.
+                val seedSpacing = c.tgtLagMs - c.refLagMs
+                val swapSuspect = abs(seedSpacing - spacingMs) > SWAP_GEOMETRY_TOL_MS
+                val rl = c.read(refLag)
+                val tl = c.read(tgtLag)
+                Log.i(
+                    TAG,
+                    "level capture ${levelCaptures.size}: " +
+                        "${reference.name}@%.1fms=%.3e ".format(refLag, rl) +
+                        "${target.name}@%.1fms=%.3e ".format(tgtLag, tl) +
+                        "delta=%+.1fdB (anchored on %s, spacing %.0fms, seed %.0fms%s)".format(
+                            if (rl > 0.0 && tl > 0.0) 20.0 * log10(tl / rl) else 0.0,
+                            if (anchorOnRef) reference.name else target.name,
+                            spacingMs.toDouble(),
+                            seedSpacing,
+                            if (swapSuspect) " SWAP-SUSPECT" else "",
+                        ),
+                )
+                if (rl > 0.0 && tl > 0.0) {
+                    levelCaptures += mapOf(reference.id to rl, target.id to tl)
+                    levelCaptureSwapSuspect += swapSuspect
+                }
+            }
+        }
         // PLAUSIBILITY FIRST. A delta larger than any real sink gap means the target was matched to
         // a ghost, and it must be thrown out before anything else looks at it.
         //
@@ -548,20 +791,61 @@ class SyncCalibrator(
         delay(SETTLE_MS)
         val vBase = measurer.measure(PAIR_PEAKS, sources = 2)
             ?: return failPair(target, "verify baseline failed")
+        val vBaseFull = measurer.fullPeaks() ?: vBase
         control.sendSetLatency(reference.id, reference.latencyMs - refOff)
         control.sendSetLatency(target.id, newLatency - tgtOff)
         delay(SETTLE_MS)
         val vProbed = measurer.measure(PAIR_PEAKS, sources = 2)
+        val vTiming = measurer.timingReader()
+        val vLevel = measurer.levelReader()
         commitLatency(reference.id, reference.latencyMs) // remove reference probe
         if (vProbed == null) return failPair(target, "verify probe failed")
         // Assign reference and target to DISTINCT re-probed peaks (drift-corrected); the
         // residual is then drift-immune. Avoids the false "could not identify" that picking
         // the strongest peak per offset causes on an aligned pair in a reflective room.
+        //
+        // TARGETED FALLBACK when the blind assignment fails: the same masking that loses a speaker
+        // in the measurement loses it here — the verify probe separates the pair again, so one
+        // side's correlation share drops below the salience floor. Rig-measured in BOTH directions
+        // (21:32 lost the reference, 21:51 lost the target at z 8.9), so the fallback is
+        // symmetric: whichever side is still salient is matched blind and pins the drift, and the
+        // other is read from the whitened correlation at its expected window. A window read below
+        // RESCUE_MIN_Z fails the verify exactly as before.
         val (vRef, vTgt) = PeakAttribution.assignVerifyPair(vProbed, vBase, refOff, tgtOff, MATCH_TOL_MS)
+            ?: PeakAttribution.assignVerifyPairWithWindows(
+                vProbed, vBase, vBaseFull, refOff, tgtOff, MATCH_TOL_MS, RESCUE_MIN_Z, vTiming,
+            )?.also { (r, t) ->
+                Log.i(
+                    TAG,
+                    "verify: pair identified via targeted window fallback " +
+                        "ref=%.1fms(z=%.1f) tgt=%.1fms(z=%.1f)".format(r.lagMs, r.z, t.lagMs, t.z),
+                )
+            }
             ?: return failPair(target, "verify could not identify reference/target")
         val residualMs = ((vTgt.lagMs - tgtOff) - (vRef.lagMs - refOff)).roundToInt()
         if (abs(residualMs) > PAIR_RESIDUAL_TOL_MS) {
             return failPair(target, "verify residual ${residualMs}ms > ${PAIR_RESIDUAL_TOL_MS}ms")
+        }
+        // HARVEST FROM THE VERIFY PROBE TOO. It is an unboosted probed capture whose pair was just
+        // identified and residual-checked — the most trustworthy lags of the whole round — and it
+        // costs no extra rig time. One more sample against MIN_LEVEL_SAMPLES, which the 3-capture
+        // yield (~2 of 3, rig-measured) chronically undershoots.
+        if (harvest) {
+            val rl = vLevel?.invoke(vRef.lagMs)
+            val tl = vLevel?.invoke(vTgt.lagMs)
+            if (rl != null && tl != null && rl > 0.0 && tl > 0.0) {
+                Log.i(
+                    TAG,
+                    "level capture ${levelCaptures.size}: " +
+                        "${reference.name}@%.1fms=%.3e ".format(vRef.lagMs, rl) +
+                        "${target.name}@%.1fms=%.3e ".format(vTgt.lagMs, tl) +
+                        "delta=%+.1fdB (verify)".format(20.0 * log10(tl / rl)),
+                )
+                levelCaptures += mapOf(reference.id to rl, target.id to tl)
+                // The verify pair was just residual-checked against the probe offsets, so its
+                // geometry is confirmed rather than assumed: never swap-suspect.
+                levelCaptureSwapSuspect += false
+            }
         }
         commitLatency(target.id, newLatency) // remove verify probe → aligned
         history?.record(target.id, deltaMs, newLatency)
@@ -719,6 +1003,11 @@ class SyncCalibrator(
                         } + " drift=%.1fms".format(attr.driftMs),
                     )
                     levelCaptures += probedLevels
+                    // The batch path reads every client at its OWN attributed lag against a shared
+                    // drift, so a per-capture pair spacing (the pair path's swap signature) does
+                    // not exist here. Not suspect by default; the batch has its own consensus
+                    // guards upstream.
+                    levelCaptureSwapSuspect += false
                 }
                 if (refMatch == null) {
                     // Reference could not be identified by its displacement → whole batch
@@ -1051,6 +1340,28 @@ class SyncCalibrator(
         val measured = clients.filterNot { it.muted }.mapNotNull { c ->
             VolumeBalance.Client(c.id, c.volumePercent, levels[c.id] ?: return@mapNotNull null)
         }
+        // NAME THE SPEAKERS THE MIC COULD NOT HEAR. Some clients going unmeasured is an accepted
+        // outcome of an empirical feature — a speaker can be too far, too quiet, or masked — but it
+        // must never be silent. The user is the only one who can act on it (move the speaker, raise
+        // its device volume, move the phone), and they cannot act on a number they never see.
+        // "Not detected" means the mic never heard it, NOT "a gate declined it". A client that
+        // produced level captures and then failed the sign or agreement check WAS heard, and
+        // telling the user to move it or turn it up would send them after the wrong problem —
+        // the same defect as the old "too quiet, raise its volume" message this file replaced.
+        val everMeasured = levelCaptures.flatMap { it.keys }.toSet()
+        val undetected = clients.filterNot { it.muted }.filter { it.id !in everMeasured }
+        if (undetected.isNotEmpty()) {
+            Log.w(
+                TAG,
+                "balance: NOT DETECTED by the mic: ${undetected.joinToString { it.name }} — " +
+                    "each is too far, too quiet at its device volume, or masked by a louder " +
+                    "speaker. Their volumes are left untouched.",
+            )
+            // NOT via progress(): the balance runs from the run's `finally`, after the terminal
+            // state has been published, so emitting progress here would overwrite Done/Failed with
+            // a Running state. Surfacing this in the user-visible summary needs the summary itself
+            // to carry it — a follow-up, not a log call.
+        }
         if (measured.size < 2) {
             Log.i(
                 TAG,
@@ -1159,11 +1470,14 @@ class SyncCalibrator(
      * Returns levels on a linear scale normalised to the loudest surviving client, which is what
      * [VolumeBalance] expects; it uses only ratios, so the choice of scale does not reach the output.
      */
-    internal fun reduceLevels(): Map<String, Double> {
+    internal fun reduceLevels(
+        captures: List<Map<String, Double>> = levelCaptures,
+        swapSuspect: List<Boolean> = levelCaptureSwapSuspect,
+    ): Map<String, Double> {
         // Centred log levels, in dB, one list per client. A capture with fewer than two clients
         // carries no between-client information at all and is not evidence of anything.
         val centred = LinkedHashMap<String, MutableList<Double>>()
-        for (capture in levelCaptures) {
+        for (capture in captures) {
             val usable = capture.filterValues { it > 0.0 }
             if (usable.size < 2) continue
             val meanLog = usable.values.sumOf { ln(it) } / usable.size
@@ -1177,12 +1491,36 @@ class SyncCalibrator(
             val loSide = samples.any { it < -LEVEL_SIGN_DEADBAND_DB }
             val fmt = samples.joinToString { "%+.1f".format(it) }
             if (hiSide && loSide) {
-                Log.w(
+                // A SIGN DISAGREEMENT IS ONLY A SWAP IF THE GEOMETRY SAYS SO.
+                //
+                // Levels alone cannot distinguish the two cases this gate has to separate. A real
+                // swap reports the reciprocal ratio with full confidence, so no amount of
+                // repetition or median-taking catches it — that is why the gate exists. But
+                // ordinary noise near balance produces the same level pattern: with a room a few dB
+                // out and a per-capture spread around 5 dB (rig-measured), one capture of five
+                // landing the other side of zero is the expected outcome, not a defect.
+                //
+                // The lags separate them. A swap exchanges which arrival each speaker was read at,
+                // so that capture's measured pair spacing departs from the round's consensus by
+                // about twice the probe difference; noise leaves the spacing intact and moves only
+                // the value. Rig 2026-08-13: the one dissenting capture of five had spacing 387 ms
+                // against the round's 377 — geometry perfect, and the whole run was declined
+                // anyway, on a room that genuinely needed correcting.
+                if (swapSuspect.any { it }) {
+                    Log.w(
+                        TAG,
+                        "balance: $id DECLINED — captures disagree on SIGN ($fmt dB) AND at least " +
+                            "one capture's geometry departs from the round's spacing: a swapped " +
+                            "attribution is the likely cause, not noise",
+                    )
+                    continue
+                }
+                Log.i(
                     TAG,
-                    "balance: $id DECLINED — captures disagree on SIGN ($fmt dB), which is the " +
-                        "signature of a swapped attribution, not noise",
+                    "balance: $id captures disagree on SIGN ($fmt dB) but every capture's geometry " +
+                        "matches the round's spacing — treating as noise near balance, and letting " +
+                        "the agreement gate below judge it",
                 )
-                continue
             }
             val mid = median(samples)
             val agreed = samples.filter { abs(it - mid) <= LEVEL_AGREEMENT_DB }
@@ -1456,6 +1794,41 @@ class SyncCalibrator(
         private const val MATCH_TOL_MS = 15.0
         private const val MIN_PEAK_Z = 9.0
 
+        /** Acceptance floor for a TARGETED window read ([Dsp.peakNear]) rescuing a reference the
+         *  blind search lost. Deliberately below [MIN_PEAK_Z]: a PHAT peak carries only its
+         *  source's share of the capture energy, so beside a comparably loud sibling a real
+         *  speaker measures z 6.5-9.0 (three two-speaker dumps, 2026-08-10) while ±15 ms noise
+         *  windows on the same dumps top out at p95 5.1-6.0 and an absent speaker's expected
+         *  window read 5.3. 6.0 passes every measured real arrival and rejects the measured
+         *  absent one; the cross-capture spacing quorum below carries the rest of the
+         *  discrimination, so this floor need not separate perfectly on its own. */
+        private const val RESCUE_MIN_Z = 6.0
+
+        /** Two rescue candidates agree when their within-capture spacings (target − reference)
+         *  match this closely. Spacing is the wobble-free observable: the whole timeline drifts
+         *  ±10-20 ms between captures of one run (measured on the 2026-08-10 baselines), but both
+         *  speakers drift together, and true probe deltas repeated within ±4 ms in the failing
+         *  run's target matches. A ±15 ms window noise peak lands at a fresh lag every capture,
+         *  so demanding 5 ms spacing agreement across captures is what noise cannot fake. */
+        private const val RESCUE_AGREE_MS = 5.0
+
+        /** Distinct probe CAPTURES the modal spacing group must span before a rescue is
+         *  believed. Candidates from one capture all read the same window of the same audio, so
+         *  they corroborate nothing; two independent captures agreeing on spacing is the
+         *  smallest real quorum (of PROBE_REPEATS = 3). */
+        private const val RESCUE_MIN_CAPTURES = 2
+
+        /** Half-width of the level read's local search. Larger than the lag uncertainty a quiet
+         *  speaker's arrival carries (10-70 ms rig-measured), far smaller than the 380 ms the
+         *  level probe set puts between the two speakers, so it can never read the wrong one. */
+        private const val LEVEL_READ_HALF_MS = 25.0
+
+        /** How far either side of a seed lag both arrivals are re-located before their level is
+         *  read. Wide enough to absorb the consensus spacing's own error (10-20 ms rig-measured),
+         *  narrow enough that it cannot reach the other speaker, which the level probe set puts
+         *  380 ms away. */
+        private const val LEVEL_PEAK_FIND_MS = 25.0
+
         /** Unboosted level readings a client needs before the balance will move its volume.
          *
          *  THREE, not two, and the first rig run is why. It balanced off two captures that put the
@@ -1484,6 +1857,13 @@ class SyncCalibrator(
          *  zero by noise alone; without a deadband that reads as a swap every time. 1 dB is half the
          *  balance's own decision threshold, so nothing inside it could change an outcome anyway. */
         internal const val LEVEL_SIGN_DEADBAND_DB = 1.0
+
+        /** How far one capture's own pair spacing may sit from the round's consensus spacing
+         *  before that capture is treated as possibly SWAPPED. Generous against the 10-20 ms of
+         *  per-capture drift and the ±25 ms peak re-location, and still an order of magnitude
+         *  under a real swap, which displaces the pair by about twice the probe difference
+         *  (2 × 380 ms here). */
+        internal const val SWAP_GEOMETRY_TOL_MS = 100.0
 
         private const val LN10 = 2.302585092994046
     }

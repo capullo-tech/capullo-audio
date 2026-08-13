@@ -64,11 +64,46 @@ class OrchestrationTest {
         /** Return null for these specific 1-based measure() calls, to make individual captures
          *  inconclusive without killing a whole round (the rig's actual failure shape). */
         val nullOnCalls: Set<Int> = emptySet(),
+        /** Clients MASKED BY ENERGY SHARING — the rig-measured two-speaker failure: a PHAT peak
+         *  carries only its source's share of the capture energy, so a merged blob (arrivals close
+         *  together) is salient while the same speaker probed apart from its sibling drops under the
+         *  salience floor. Modelled as: the client's peak appears in the salient list only while
+         *  another client's arrival sits within [MASK_MERGE_MS]; its arrival stays readable through
+         *  [timingReader] at [maskedZ]. */
+        val masked: Set<String> = emptySet(),
+        val maskedZ: Double = 7.0,
+        /** Masked clients whose arrival is gone from the TIMING read too (speaker genuinely absent
+         *  or below even the window floor); their windows answer with noise instead. */
+        val probeVanishes: Set<String> = emptySet(),
+        /** z of the noise lump an empty window returns, at a lag that varies per capture — window
+         *  noise never recurs at the same place, which is what the spacing quorum exploits. */
+        val windowNoiseZ: Double = 4.0,
+        /** 1-based measure() call -> error, in ms, added to [jitterClient]'s REPORTED peak lag
+         *  while its true arrival (what the level reader answers at) stays put. Models the
+         *  rig-measured failure: a quiet speaker's peak cannot be located reliably capture to
+         *  capture (matched 74 ms apart in consecutive captures on 2026-08-11), so a level read at
+         *  the matched lag lands on nothing. */
+        val lagJitter: Map<Int, Double> = emptyMap(),
+        val jitterClient: String? = null,
+        /** Half-width of the fake's level read, mirroring SyncCalibrator.LEVEL_READ_HALF_MS. The
+         *  default is the narrow point-read the shipped code used before 2026-08-11. */
+        val levelHalfMs: Double = 8.0,
     ) : Measurer {
         var measureCalls = 0
-        private fun peaks(callNo: Int): List<Dsp.Peak> = intrinsic.mapNotNull { (id, base) ->
-            if (dropOnMeasureCall?.first == id && dropOnMeasureCall.second == callNo) null
-            else Dsp.Peak(base - (control.latency[id] ?: 0), z.getValue(id))
+        private fun peaks(callNo: Int): List<Dsp.Peak> {
+            val live = intrinsic.mapValues { (id, base) -> base - (control.latency[id] ?: 0) }
+            return intrinsic.keys.mapNotNull { id ->
+                val lag = live.getValue(id)
+                val merged = live.any { (o, l) -> o != id && kotlin.math.abs(l - lag) <= MASK_MERGE_MS }
+                if (dropOnMeasureCall?.first == id && dropOnMeasureCall.second == callNo) {
+                    null
+                } else if (id in masked && !merged) {
+                    null
+                } else {
+                    val err = if (id == jitterClient) lagJitter[callNo] ?: 0.0 else 0.0
+                    Dsp.Peak(lag + err, z.getValue(id))
+                }
+            }
         }
         /** [sources] is recorded rather than acted on: this fake renders one peak per client by
          *  construction, so it has no cluster for the per-source search to matter to. The callers'
@@ -97,12 +132,48 @@ class OrchestrationTest {
             val live = intrinsic.mapValues { (id, base) -> base - (control.latency[id] ?: 0) }
             return { lag ->
                 val who = live.entries.minByOrNull { kotlin.math.abs(it.value - lag) }
-                if (who != null && kotlin.math.abs(who.value - lag) <= 8.0) {
+                if (who != null && kotlin.math.abs(who.value - lag) <= levelHalfMs) {
                     (level ?: z).getValue(who.key)
                 } else {
                     1.0
                 }
             }
+        }
+
+        /** Like the real one: the strongest lump in a ±tol window of the whitened correlation,
+         *  bound to the capture at grab time. A real arrival in the window answers at its true lag
+         *  (a masked client at [maskedZ] — masking hides it from the top-N list, not from a direct
+         *  read); an empty window answers a noise lump at a per-capture-varying lag. */
+        override fun timingReader(): ((Double, Double) -> Dsp.Peak?) {
+            val call = measureCalls
+            // A client dropped from this capture is gone from the timing correlation too — a
+            // glitch silences the audio, not just the peak list.
+            val live = intrinsic
+                .filterKeys {
+                    it !in probeVanishes &&
+                        !(dropOnMeasureCall?.first == it && dropOnMeasureCall?.second == call)
+                }
+                .mapValues { (id, base) -> base - (control.latency[id] ?: 0) }
+            return { lag, tol ->
+                val who = live.entries.minByOrNull { kotlin.math.abs(it.value - lag) }
+                if (who != null && kotlin.math.abs(who.value - lag) <= tol) {
+                    Dsp.Peak(who.value, if (who.key in masked) maskedZ else z.getValue(who.key))
+                } else {
+                    Dsp.Peak(lag - tol + (call * 7.3) % (2 * tol), windowNoiseZ)
+                }
+            }
+        }
+
+        /** The pre-salience-filter list: every client's arrival, masked ones at [maskedZ] — the
+         *  sub-salient baseline structure the rescue anchors its windows on. */
+        override fun fullPeaks(): List<Dsp.Peak> = intrinsic.map { (id, base) ->
+            Dsp.Peak(base - (control.latency[id] ?: 0), if (id in masked) maskedZ else z.getValue(id))
+        }
+
+        companion object {
+            /** Arrivals closer than this render as one salient blob (the fake's stand-in for the
+             *  share-of-energy physics; the rig's natural pair separation is ~17 ms). */
+            const val MASK_MERGE_MS = 60.0
         }
     }
 
@@ -542,16 +613,17 @@ class OrchestrationTest {
         // at their natural arrivals, which on the rig were about a millisecond apart, and the level
         // estimator needs ~30 ms of separation. The probe offsets provide it; the baseline cannot.
         //
-        // So a run yields at most PROBE_REPEATS level captures, one per probe capture that
-        // attributed. Here two of the three probe captures are killed, leaving one, which is under
-        // MIN_LEVEL_SAMPLES — the balance must then decline rather than act on a single reading.
+        // So a run yields at most one level capture per probe capture that attributed (plus one
+        // from the verify probe). Here five of the six harvest probes are killed, leaving one probe
+        // capture and the verify capture — two readings, still under MIN_LEVEL_SAMPLES — and the
+        // balance must decline rather than act on them.
         runTest {
             val control = FakeControl(mapOf("ref" to 0, "t" to 0))
             val measurer = SceneMeasurer(
                 control,
                 intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
                 z = mapOf("ref" to 40.0, "t" to 20.0),
-                nullOnCalls = setOf(5, 6), // 1-3 baselines, 4-6 probes
+                nullOnCalls = setOf(5, 6, 7, 8, 9), // 1-3 baselines, 4-9 harvest probes
             )
             val cal = SyncCalibrator(
                 tapArm = {}, control = control,
@@ -658,9 +730,10 @@ class OrchestrationTest {
             control,
             intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
             z = mapOf("ref" to 40.0, "t" to 20.0),
-            // Pair path measure() order: 3 baselines, 3 probes, verify baseline, verify probe.
-            // Killing the target in the verify PROBE fails the verify after the levels are in hand.
-            dropOnMeasureCall = "t" to 8,
+            // Pair path measure() order: 3 baselines, 6 harvest probes, verify baseline, verify
+            // probe (harvest rounds take PROBE_REPEATS*2 probes). Killing the target in the verify
+            // PROBE fails the verify after the levels are in hand.
+            dropOnMeasureCall = "t" to 11,
         )
         val cal = SyncCalibrator(
             tapArm = {}, control = control,
@@ -719,6 +792,222 @@ class OrchestrationTest {
                 ),
             )
         }
+    }
+
+    @Test
+    fun `levels survive a quiet speaker whose matched lag scatters between captures`() = runTest {
+        // THE RIG FAILURE, 2026-08-11 01:54. With the target 12.4 dB down, its peak was matched
+        // 74 ms apart in consecutive captures, and levels read AT THOSE LAGS reported -8.7 dB and
+        // -1.2 dB for a room an independent capture put at -7.23 dB. The agreement gate then
+        // declined — correct, but the feature never acts.
+        //
+        // Here the target's REPORTED lag is wrong by +-12 ms on two of the four probe captures —
+        // inside MATCH_TOL_MS, so attribution still succeeds and the capture is USED, but outside
+        // the level read's window, so the level lands on nothing. (A larger error would simply
+        // fail to match and the capture would be discarded, which is not the defect.)
+        // while its true arrival never moves. The consensus spacing (median over all samples) is
+        // still right, so anchoring on the loud reference and DERIVING the target's lag must
+        // recover the true level on every capture. Reading each capture's own matched lag cannot:
+        // on the jittered captures it lands 60 ms away, where nothing is playing.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 12.0),
+            level = mapOf("ref" to 1.0, "t" to 0.25), // true room: target 12 dB down
+            // Probe captures are calls 4-7 (1-3 are baselines).
+            lagJitter = mapOf(4 to 12.0, 5 to -12.0, 6 to 10.0, 7 to -11.0),
+            jitterClient = "t",
+            levelHalfMs = 25.0, // mirrors SyncCalibrator.LEVEL_READ_HALF_MS
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        val levels = cal.reduceLevels()
+        assertTrue("both clients must be measured, got ${levels.keys}", levels.size == 2)
+        // The room is genuinely 12 dB lopsided. Reading each capture at its own mis-matched lag
+        // finds nothing there and reports the floor for BOTH clients, i.e. "already even" — the
+        // worst possible answer, since it is confidently wrong and writes nothing.
+        assertEquals(
+            "the true 0.25 ratio must survive the scatter",
+            0.25,
+            levels.getValue("t") / levels.getValue("ref"),
+            0.02,
+        )
+        assertTrue(
+            "a 12 dB lopsided room must not be called balanced",
+            !VolumeBalance.isBalanced(levels.map { (id, l) -> VolumeBalance.Client(id, 100, l) }),
+        )
+    }
+
+    @Test
+    fun `a reference masked by energy sharing is rescued from its expected probe window`() = runTest {
+        // The 2026-08-10 failing run, reconstructed: two speakers 40 ms apart at the mic. The
+        // baseline blob is salient (arrivals merged), but the probe separates them and the
+        // reference's correlation share drops under the salience floor — it vanishes from every
+        // salient peak list while remaining plainly audible. Old behaviour: nine attribution
+        // pairings with zero reference candidates, "reference not detected", nothing written.
+        // With the targeted rescue the reference is read straight out of its expected window
+        // (baseline leader + refOff), the spacing agrees across captures, and the pair completes
+        // with the true 40 ms trim.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1040.0),
+            z = mapOf("ref" to 30.0, "t" to 20.0),
+            masked = setOf("ref"),
+            maskedZ = 7.0, // rig-measured range for a real masked arrival: 6.5-9.0
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        assertEquals("the true 40ms trim must be found via the rescued reference", 40, control.latency["t"])
+        val text = (cal.state.value as? SyncCalibrator.State.Done)?.summary ?: ""
+        assertTrue("run should complete, got: ${cal.state.value}", text.contains("trim 40ms"))
+    }
+
+    @Test
+    fun `a reference sub-salient in the baseline too is rescued via the full peak list`() = runTest {
+        // The 21:32 rig failure: speakers ~150 ms apart at the mic, so there is no merged blob —
+        // the reference is under the salience floor in the BASELINE as well as the probe, and a
+        // rescue anchored on salient baseline leaders has nowhere to open its windows (the run
+        // declined with 2 noise candidates). The full pre-filter list still carries the
+        // reference's baseline region (rig: z 6.4-8.3), which is where the anchors must come from.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1150.0),
+            z = mapOf("ref" to 30.0, "t" to 20.0),
+            masked = setOf("ref"),
+            maskedZ = 7.0,
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        assertEquals("the true 150ms trim must be found via sub-salient anchors", 150, control.latency["t"])
+        val text = (cal.state.value as? SyncCalibrator.State.Done)?.summary ?: ""
+        assertTrue("run should complete, got: ${cal.state.value}", text.contains("trim 150ms"))
+    }
+
+    @Test
+    fun `a rescue candidate below the window floor is refused and nothing is written`() = runTest {
+        // Same masking scene, but the reference's windowed read comes back at z 5 — inside the
+        // measured noise band (±15 ms window maxima p95 5.1-6.0, absent-speaker control 5.3).
+        // The rescue must refuse it: a decline is recoverable, a latency built on a noise lump
+        // is not.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1040.0),
+            z = mapOf("ref" to 30.0, "t" to 20.0),
+            masked = setOf("ref"),
+            maskedZ = 5.0,
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        assertEquals("no correction may be built on a sub-floor window read", 0, control.latency["t"])
+    }
+
+    @Test
+    fun `window noise with a plausible z cannot fake a reference - the spacing quorum refuses it`() = runTest {
+        // The adversarial case for the rescue: the reference is genuinely gone from the probed
+        // audio (its window answers pure noise), and the noise lumps come back ABOVE the z floor.
+        // What noise cannot do is recur at the same within-capture spacing across independent
+        // captures — each capture's lump lands at a fresh lag. The quorum must refuse the rescue
+        // and the run must decline rather than write a latency derived from noise.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1040.0),
+            z = mapOf("ref" to 30.0, "t" to 20.0),
+            masked = setOf("ref"),
+            probeVanishes = setOf("ref"),
+            windowNoiseZ = 7.0, // plausible z — only the spacing test can catch this
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        assertEquals("noise-derived spacings must not elect a reference", 0, control.latency["t"])
+    }
+
+    // ---- the sign gate distinguishes a swap from noise by GEOMETRY ------------------------
+    //
+    // Both scenes below have the SAME level pattern: four captures agreeing that "a" is louder and
+    // one dissenting. Levels alone cannot tell them apart, which is why the gate used to decline
+    // both. The lags can: a swap displaces the pair's spacing, noise leaves it intact.
+
+    private fun signScene() = listOf(
+        mapOf("a" to 1.00, "b" to 0.60),
+        mapOf("a" to 1.00, "b" to 0.55),
+        mapOf("a" to 0.62, "b" to 1.00), // the dissenter
+        mapOf("a" to 1.00, "b" to 0.58),
+        mapOf("a" to 1.00, "b" to 0.64),
+    )
+
+    @Test
+    fun `sign disagreement with intact geometry is noise and does not decline`() = runTest {
+        // THE RIG CASE, 2026-08-13: room ~3 dB out, per-capture spread ~5 dB, one capture of five
+        // landed the other side of zero while its lags matched the round to 10 ms. Declining here
+        // refuses to correct a room that genuinely needs it.
+        val cal = SyncCalibrator(
+            tapArm = {}, control = FakeControl(emptyMap()), readLatencies = { emptyMap() },
+        )
+        val levels = cal.reduceLevels(signScene(), List(5) { false })
+        assertTrue("geometry was intact, so the run must not be declined as a swap", levels.isNotEmpty())
+        assertTrue("both clients survive", levels.size == 2)
+        assertTrue("the majority verdict stands: a is the louder one", levels.getValue("a") > levels.getValue("b"))
+    }
+
+    @Test
+    fun `sign disagreement with broken geometry is still refused as a suspected swap`() = runTest {
+        // Identical levels, but one capture's pair spacing departed from the round's consensus —
+        // the signature of the reference and target being read at each other's arrivals. A swap
+        // reports the reciprocal ratio with full confidence, so repetition cannot catch it and the
+        // gate must still refuse.
+        val cal = SyncCalibrator(
+            tapArm = {}, control = FakeControl(emptyMap()), readLatencies = { emptyMap() },
+        )
+        val suspect = listOf(false, false, true, false, false)
+        assertTrue(
+            "a geometry mismatch must still decline",
+            cal.reduceLevels(signScene(), suspect).isEmpty(),
+        )
     }
 
     private companion object {
