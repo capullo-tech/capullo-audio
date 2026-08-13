@@ -18,11 +18,17 @@ import kotlin.math.roundToInt
  *
  * TWO RULES THAT SHAPE THE OUTPUT, both from how it gets used rather than from the acoustics:
  *
- *  - **Headroom.** The loudest client is placed at [HEADROOM_PERCENT], never at 100. Balance is a set
- *    of RATIOS, and pinning the loudest to full scale would leave the user unable to turn everything
- *    up afterwards without editing clients one by one — the balance would have silently consumed
- *    their global control. Leaving room means a later global change scales all clients together and
- *    preserves the balance.
+ *  - **Ceiling.** The loudest client is placed at [HEADROOM_PERCENT], which is 100: SW gain is
+ *    full scale and the balance only comes DOWN from it.
+ *
+ *    This used to be 80, to leave the user room to turn everything up afterwards without editing
+ *    clients one by one. That reasoning was overtaken by the 2026-08-11 gain-staging decision: the
+ *    user's global control is the DEVICE volume (their own ceiling, which the app never touches),
+ *    so the SW axis does not need to reserve anything for them. Holding it at 80 was actively
+ *    harmful, because the client that ends up highest in SW is the FAR speaker — the one already
+ *    fighting to stay above the mic's detection floor — and the reserve cost it 4.6 dB of the level
+ *    it least had to spare. Rig-observed 2026-08-11: a successful balance left the far speaker at
+ *    60 % and pinned the near one at exactly this cap.
  *  - **Attenuate rather than amplify.** Equalising by pulling the near speaker down, instead of
  *    pushing the far one up, gives the same measurement quality with less noise in the room, and it
  *    is the direction that always has somewhere to go: SW gain starts at 100%, so there is headroom
@@ -30,8 +36,9 @@ import kotlin.math.roundToInt
  */
 object VolumeBalance {
 
-    /** Where the loudest client lands, leaving the rest of the range for a later global change. */
-    const val HEADROOM_PERCENT = 80
+    /** Where the loudest client lands: full scale. The absolute level of the room is the user's
+     *  DEVICE volume, which the app never touches, so the SW axis reserves nothing. */
+    const val HEADROOM_PERCENT = 100
 
     /** Never drive a client below this: past it a speaker stops contributing to the room at all,
      *  and it would also fall under the calibration's own detection floor. */

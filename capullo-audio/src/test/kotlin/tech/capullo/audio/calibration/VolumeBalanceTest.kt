@@ -32,7 +32,7 @@ class VolumeBalanceTest {
             listOf(c("a", 100, 40.0), c("b", 100, 12.0)),
         )!!
         assertEquals(VolumeBalance.HEADROOM_PERCENT, g.values.max())
-        assertTrue("nothing may sit at full scale", g.values.none { it > VolumeBalance.HEADROOM_PERCENT })
+        assertTrue("nothing may exceed the ceiling", g.values.none { it > VolumeBalance.HEADROOM_PERCENT })
     }
 
     @Test
@@ -112,7 +112,10 @@ class VolumeBalanceTest {
         // a mere 6 dB imbalance spent the ENTIRE blast-radius budget, every time. The exact law asks
         // for the 6.0 dB that is actually needed and lands short of the cap, which is what leaves the
         // cap free to do its real job of bounding a wrong measurement.
-        val start = 80
+        // Both start at FULL SCALE, which is where clients now start (2026-08-11 gain-staging
+        // decision): the quiet one is already at the ceiling so no group scaling is involved, and
+        // the loud one simply comes down to meet it.
+        val start = 100
         val g = VolumeBalance.computeGains(listOf(c("loud", start, 20.0), c("quiet", start, 10.0)))!!
         val capFloor = VolumeBalance.amplitudeToPercent(
             VolumeBalance.percentToAmplitude(start) * Math.pow(10.0, -VolumeBalance.MAX_CORRECTION_DB / 20.0),
