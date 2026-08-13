@@ -308,10 +308,50 @@ object Dsp {
         return if (peak == Double.NEGATIVE_INFINITY) 0.0 else peak
     }
 
+    /**
+     * The strongest sample within ±[tolMs] of [centerMs], z-scored against the median |value|
+     * of the WHOLE array — the same floor every blind search uses.
+     *
+     * This is the TARGETED detector for a source whose position is already pinned by geometry
+     * (a probed reference must sit at baseline + its own offset). A blind search cannot find it:
+     * a PHAT peak carries only that source's SHARE of the capture's energy, so a speaker that
+     * measures z≈12 solo reads z≈6-9 the moment a sibling plays (rig-measured 2026-08-10:
+     * 6.5/9.0/8.2 across three two-speaker dumps against a MIN_PEAK_Z of 9), and the anchor
+     * guard of [findPeaksPerSource] can land on the loud speaker's reflection tail instead
+     * (rig-measured tail spread 84-127 ms against an 80 ms guard). At a KNOWN lag both traps
+     * vanish: the ±15 ms noise-window maxima on the same dumps read p95 5.1-6.0, so a real
+     * arrival at 6.5+ stands clear where a whole-range threshold cannot separate anything.
+     *
+     * Returns the peak WHATEVER its z — thresholding is the caller's decision, made against
+     * [SyncCalibrator] rescue gates, not here.
+     */
+    fun peakNear(r: DoubleArray, fs: Int, centerMs: Double, tolMs: Double): Peak? {
+        if (r.isEmpty()) return null
+        val lo = ((centerMs - tolMs) * fs / 1000.0).toInt().coerceIn(0, r.size - 1)
+        val hi = ((centerMs + tolMs) * fs / 1000.0).toInt().coerceIn(lo + 1, r.size)
+        var best = lo
+        for (i in lo until hi) if (r[i] > r[best]) best = i
+        val noise = r.map { abs(it) }.sorted()[r.size / 2] + 1e-18
+        return Peak(best * 1000.0 / fs, r[best] / noise)
+    }
+
     /** How far one source's arrivals spread: direct path plus the room's reflections of it.
      *  Rig-measured at 50-80 ms indoors. Mirrors [PeakAttribution.SOURCE_SPREAD_MS], kept here so
      *  the DSP layer does not depend on the matching layer. */
     const val SOURCE_SPREAD_MS = 80.0
+
+    /** Minimum separation between the SOURCE ANCHORS of [findPeaksPerSource]. Wider than
+     *  [SOURCE_SPREAD_MS] because the measured tail of one source (84-127 ms at z≥6 across four
+     *  rig dumps, 2026-08-10) exceeds that window, and an anchor landing in a tail spends a source
+     *  slot on a speaker already found. Two probed speakers are 380 ms apart by design
+     *  ([SyncCalibrator.LEVEL_PROBE_SET_MS]), so this cannot merge them; two UNPROBED speakers
+     *  closer than this share one anchor, and the stage-2 window then covers both. */
+    const val ANCHOR_GUARD_MS = 150.0
+
+    /** Extra anchor slots beyond the expected source count. Music self-similarity peaks and noise
+     *  lumps compete for slots and can out-rank a real but quieter speaker (rig 2026-08-11: a
+     *  360 ms ghost at z 8.2 displaced the real second speaker at z 7.4). */
+    const val ANCHOR_HEADROOM = 1
 
     /**
      * Peaks covering UP TO [sources] distinct sources, [perSource] peaks from each.
@@ -344,9 +384,33 @@ object Dsp {
         perSource: Int = 4,
         guardMs: Double = 4.0,
         spreadMs: Double = SOURCE_SPREAD_MS,
+        anchorGuardMs: Double = ANCHOR_GUARD_MS,
+        anchorHeadroom: Int = ANCHOR_HEADROOM,
     ): List<Peak> {
-        // Stage 1: one anchor per source region, separated by a whole source width.
-        val anchors = findPeaks(r, fs, loMs, hiMs, count = sources, guardMs = spreadMs)
+        // Stage 1: locate source REGIONS. Two things this stage must survive, both rig-measured:
+        //
+        // - A source's own reflection tail must not take a second anchor. Tails run 84-127 ms at
+        //   z≥6 on this rig, so anchors are separated by [ANCHOR_GUARD_MS], not by the narrower
+        //   stage-2 window [spreadMs] (which stays at one source's width, its own job).
+        // - SPURIOUS peaks compete for anchor slots, and asking for exactly `sources` anchors
+        //   assumes the top-N peaks ARE the speakers — the same assumption that made a plain
+        //   top-N search fail. Measured on `dumps/pcm-20260811-013443`: the top two anchors are
+        //   the loud speaker (z 18.0) and a music self-similarity peak at 360 ms (z 8.2), while
+        //   the real second speaker at 1260 ms (z 7.4) gets no anchor and is never searched — the
+        //   defect that starved the 01:36 balance run of half its level captures. With one slot
+        //   of headroom it is found on every capture on file.
+        //
+        // Extra anchors cost peaks in the returned list, which the caller's salience filter and
+        // the matcher's gates already handle; a missed source cannot be recovered downstream at
+        // all.
+        val anchors = findPeaks(
+            r,
+            fs,
+            loMs,
+            hiMs,
+            count = sources + anchorHeadroom,
+            guardMs = anchorGuardMs,
+        )
         // Stage 2: the fine structure around each anchor, which is where the direct path is.
         //
         // z MUST STAY SCORED AGAINST THE WHOLE RANGE. `findPeaks` divides by the median |value| of

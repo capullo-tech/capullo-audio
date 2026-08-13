@@ -28,10 +28,20 @@ object DelayMeasurement {
         val levelCorrelation: DoubleArray,
         val fs: Int,
         val spanMs: Int,
+        /** Whitened correlation, rotated like [levelCorrelation]. Kept so a source whose position is
+         *  KNOWN from geometry can be read back directly after the salience-filtered peak list has
+         *  dropped it — see [Dsp.peakNear] for why a blind list loses a quiet sibling. Defaulted so
+         *  fakes that only script peaks keep compiling; they simply offer no targeted reads. */
+        val timingCorrelation: DoubleArray = DoubleArray(0),
     ) {
         /** This capture's correlation value at [lagMs]. Compare only against another client's value
          *  from the SAME capture; the ratio is the level ratio. */
         fun levelAt(lagMs: Double): Double = Dsp.levelAt(levelCorrelation, fs, lagMs)
+
+        /** Strongest whitened-correlation sample within ±[tolMs] of [lagMs], z-scored against this
+         *  capture's own floor; null when the timing array wasn't kept. */
+        fun timingPeakNear(lagMs: Double, tolMs: Double): Dsp.Peak? =
+            Dsp.peakNear(timingCorrelation, fs, lagMs, tolMs)
     }
 
     /** Peaks only — the sync path's view. */
@@ -135,6 +145,7 @@ object DelayMeasurement {
             levelCorrelation = delayedLevel,
             fs = fs,
             spanMs = spanMs,
+            timingCorrelation = delayed,
         )
     }
 }

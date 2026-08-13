@@ -227,6 +227,59 @@ object PeakAttribution {
     }
 
     /**
+     * Verify-pair fallback for when [assignVerifyPair] cannot find TWO distinct salient probed
+     * leaders: one side of the pair is usually sub-salient in the shared capture (its correlation
+     * share sits under the salience floor — the masking physics measured 2026-08-10, in BOTH
+     * directions across two runs: 21:32 lost the reference, 21:51 lost the target at z 8.9).
+     *
+     * Whichever slot CAN be blind-matched among the salient leaders anchors the drift; the other
+     * is read straight out of the whitened correlation via [windowPeak] at every sub-salient
+     * baseline anchor (full pre-filter list, z ≥ [minWindowZ]) + its offset + drift. A window
+     * read below [minWindowZ] fails, exactly as the blind assignment would have.
+     *
+     * Pure: the correlation access is injected, so this is unit-testable without audio.
+     * Returns (reference, target) or null.
+     */
+    fun assignVerifyPairWithWindows(
+        probed: List<Dsp.Peak>,
+        baseline: List<Dsp.Peak>,
+        baselineFull: List<Dsp.Peak>,
+        refOffMs: Int,
+        tgtOffMs: Int,
+        matchTolMs: Double,
+        minWindowZ: Double,
+        windowPeak: ((Double, Double) -> Dsp.Peak?)?,
+    ): Pair<Dsp.Peak, Dsp.Peak>? {
+        val b = clusterLeaders(baseline)
+        val p = clusterLeaders(probed)
+        if (b.isEmpty() || p.isEmpty()) return null
+        fun blind(off: Int): Dsp.Peak? = p
+            .mapNotNull { pp ->
+                val err = b.minOf { abs(pp.lagMs - it.lagMs - off) }
+                if (err <= matchTolMs) pp to err else null
+            }
+            .minByOrNull { it.second }?.first
+        fun drift(pp: Dsp.Peak, off: Int): Double =
+            pp.lagMs - b.minByOrNull { abs(pp.lagMs - it.lagMs - off) }!!.lagMs - off
+        fun window(off: Int, d: Double, exclude: Dsp.Peak): Dsp.Peak? {
+            if (windowPeak == null) return null
+            return clusterLeaders(baselineFull)
+                .filter { it.z >= minWindowZ }
+                .mapNotNull { anchor -> windowPeak(anchor.lagMs + off + d, matchTolMs) }
+                .filter { it.z >= minWindowZ && abs(it.lagMs - exclude.lagMs) > CLUSTER_MS }
+                .maxByOrNull { it.z }
+        }
+        val bt = blind(tgtOffMs)
+        val br = blind(refOffMs)
+        return when {
+            bt != null && br != null && abs(bt.lagMs - br.lagMs) > CLUSTER_MS -> br to bt
+            bt != null -> window(refOffMs, drift(bt, tgtOffMs), bt)?.let { it to bt }
+            br != null -> window(tgtOffMs, drift(br, refOffMs), br)?.let { br to it }
+            else -> null
+        }
+    }
+
+    /**
      * How much of the baseline pattern around [anchorLagMs] reappears in [probed], shifted by
      * [shiftMs]. Counts the baseline peaks within [SOURCE_SPREAD_MS] of the anchor that have a
      * probed counterpart at their own lag + shift.

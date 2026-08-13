@@ -342,4 +342,51 @@ class PeakAttributionTest {
         // A shift nothing actually took has no support.
         assertEquals(0, PeakAttribution.patternSupport(baseline, probed, 1000.0, 500.0, 15.0))
     }
+
+    // ---- assignVerifyPairWithWindows: the symmetric masked-side fallback ----------------
+    //
+    // Numbers from the 2026-08-10 21:51 rig run, where the blind assignment failed because the
+    // TARGET's verify-probe peak sat at z 8.9 — one tenth under the salience floor — while the
+    // reference was salient at z 9.1. The 21:32 run failed the mirrored way (reference masked).
+
+    private val vBase = listOf(peak(1294.2, 13.8), peak(1307.1, 12.9), peak(1326.3, 11.5))
+
+    @Test
+    fun `verify fallback window-reads a masked target anchored on the blind-matched reference`() {
+        // Salient probed list holds ONLY the reference (vBase leader 1307.1 + 90, drift +11.7).
+        val probed = listOf(peak(1408.8, 9.1))
+        val pair = PeakAttribution.assignVerifyPairWithWindows(
+            probed, vBase, vBase, 90, 470, 15.0, 6.0,
+        ) { center, tol ->
+            // The real target arrival at 1792.8 (z 8.9) answers windows near it; empty windows
+            // answer the correlation floor.
+            if (abs(center - 1792.8) <= tol) peak(1792.8, 8.9) else peak(center, 4.0)
+        }
+        assertNotNull("masked target must be window-rescued", pair)
+        assertEquals(1408.8, pair!!.first.lagMs, 0.01)
+        assertEquals(1792.8, pair.second.lagMs, 0.01)
+    }
+
+    @Test
+    fun `verify fallback window-reads a masked reference anchored on the blind-matched target`() {
+        // Mirror of 21:32: only the target is salient (vBase leader 1294.2 + 470, drift ~0).
+        val probed = listOf(peak(1764.5, 12.2))
+        val pair = PeakAttribution.assignVerifyPairWithWindows(
+            probed, vBase, vBase, 90, 470, 15.0, 6.0,
+        ) { center, tol ->
+            if (abs(center - 1397.3) <= tol) peak(1397.3, 7.2) else peak(center, 4.0)
+        }
+        assertNotNull("masked reference must be window-rescued", pair)
+        assertEquals(1397.3, pair!!.first.lagMs, 0.01)
+        assertEquals(1764.5, pair.second.lagMs, 0.01)
+    }
+
+    @Test
+    fun `verify fallback refuses a missing side whose windows hold only noise`() {
+        val probed = listOf(peak(1408.8, 9.1))
+        val pair = PeakAttribution.assignVerifyPairWithWindows(
+            probed, vBase, vBase, 90, 470, 15.0, 6.0,
+        ) { center, _ -> peak(center, 4.9) } // everything under the window floor
+        assertNull("a sub-floor window read must fail the verify", pair)
+    }
 }
