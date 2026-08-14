@@ -154,6 +154,12 @@ class SyncCalibrator(
      */
     private val levelCaptureSwapSuspect = mutableListOf<Boolean>()
 
+    /** True once any round in this run harvested no levels because it was BOOSTED. A boosted
+     *  speaker is louder than its SW gain says, so its levels are disqualified deliberately —
+     *  which is a different thing from the mic never hearing it, and must not be reported as if
+     *  the user should go and move a speaker. */
+    private var levelsSkippedForBoost = false
+
 
     /** A FINAL latency write (commit or restore) — records it for run-level read-back.
      *  Transient probe writes use [control].sendSetLatency directly and are not recorded. */
@@ -199,6 +205,7 @@ class SyncCalibrator(
         intended.clear()
         levelCaptures.clear()
         levelCaptureSwapSuspect.clear()
+        levelsSkippedForBoost = false
         val ring = ReferencePcmRing()
         val measurer = measurerFactory?.invoke(ring) ?: micMeasurer(ring)
         // Journal every client's pre-run latency AND volume BEFORE the first mutating write, so
@@ -365,6 +372,7 @@ class SyncCalibrator(
             if (others.isNotEmpty() || swBoost || refSwBoost || osTargets.isNotEmpty()) delay(SETTLE_MS)
             // Levels are only usable for balancing when nothing has been boosted: a boosted speaker
             // is louder than its SW gain says, so the balance would read it as needing attenuation.
+            if (boost) levelsSkippedForBoost = true
             return calibratePair(measurer, reference, target, harvestLevels = !boost)
         } finally {
             others.forEach { control.sendSetVolume(it.id, muted = it.muted, percent = it.volumePercent) }
@@ -1350,7 +1358,17 @@ class SyncCalibrator(
         // the same defect as the old "too quiet, raise its volume" message this file replaced.
         val everMeasured = levelCaptures.flatMap { it.keys }.toSet()
         val undetected = clients.filterNot { it.muted }.filter { it.id !in everMeasured }
-        if (undetected.isNotEmpty()) {
+        if (undetected.isNotEmpty() && levelsSkippedForBoost && levelCaptures.isEmpty()) {
+            // Heard fine, but every round that got far enough had been BOOSTED for detectability,
+            // and a boosted round's levels are disqualified on purpose. Saying "not detected" here
+            // sends the user to move speakers or raise volume when nothing is wrong with either.
+            Log.i(
+                TAG,
+                "balance: no levels this run — every round that completed was boosted for " +
+                    "detectability, and a boosted speaker's level does not describe its SW gain. " +
+                    "Re-run once the speakers are detectable unboosted.",
+            )
+        } else if (undetected.isNotEmpty()) {
             Log.w(
                 TAG,
                 "balance: NOT DETECTED by the mic: ${undetected.joinToString { it.name }} — " +
