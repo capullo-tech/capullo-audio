@@ -15,15 +15,27 @@ import org.junit.Test
 class OrchestrationTest {
 
     /** Fake snapserver control: an in-memory per-client latency map + a call log. */
-    private class FakeControl(initial: Map<String, Int>) : CalibrationControl {
+    private class FakeControl(
+        initial: Map<String, Int>,
+        /** Starting SW gain per client, so a scene can make audibility depend on VOLUME rather than
+         *  on a capture index. Defaults to 100 %, the app's start state. */
+        gains: Map<String, Int> = emptyMap(),
+    ) : CalibrationControl {
         val latency = initial.toMutableMap()
         val volumeCalls = mutableListOf<Triple<String, Boolean, Int>>() // (id, muted, percent), in order
+        /** The volume each client is at RIGHT NOW, tracked (not just logged) so a scene can render
+         *  a boosted speaker as detectable and the same speaker unboosted as not. That distinction
+         *  is the entire boost gap: a level read is only admissible at the real gain. */
+        val gain = initial.keys.associateWith { gains[it] ?: 100 }.toMutableMap()
+        val muted = initial.keys.associateWith { false }.toMutableMap()
         override suspend fun sendSetLatency(clientId: String, latencyMs: Int): Int? {
             latency[clientId] = latencyMs
             return 1
         }
         override suspend fun sendSetVolume(clientId: String, muted: Boolean, percent: Int) {
             volumeCalls += Triple(clientId, muted, percent)
+            gain[clientId] = percent
+            this.muted[clientId] = muted
         }
         override suspend fun sendGetStatus() {}
     }
@@ -88,14 +100,32 @@ class OrchestrationTest {
         /** Half-width of the fake's level read, mirroring SyncCalibrator.LEVEL_READ_HALF_MS. The
          *  default is the narrow point-read the shipped code used before 2026-08-11. */
         val levelHalfMs: Double = 8.0,
+        /** SW gain (percent) below which a client is INAUDIBLE: absent from the peak list and from
+         *  the timing correlation, exactly like a speaker under the detection floor. Empty means
+         *  every client is always audible, which is what every pre-existing scene assumes.
+         *
+         *  This is the rig's actual boost-gap shape rendered causally: the speaker is detectable
+         *  while boosted and undetectable at its real gain, so a run must boost to finish SYNC and
+         *  must NOT boost to harvest levels. A scene that faked it with capture indices could be
+         *  satisfied by code that boosted during the levels round, which is the one thing the
+         *  recovery is forbidden to do. */
+        val audibleAtLeastPercent: Map<String, Int> = emptyMap(),
     ) : Measurer {
+        /** Clients currently under their audibility threshold (or muted): silent for this capture. */
+        private fun silent(): Set<String> = intrinsic.keys.filter { id ->
+            control.muted[id] == true ||
+                (control.gain[id] ?: 100) < (audibleAtLeastPercent[id] ?: 0)
+        }.toSet()
         var measureCalls = 0
         private fun peaks(callNo: Int): List<Dsp.Peak> {
             val live = intrinsic.mapValues { (id, base) -> base - (control.latency[id] ?: 0) }
+            val silent = silent()
             return intrinsic.keys.mapNotNull { id ->
                 val lag = live.getValue(id)
                 val merged = live.any { (o, l) -> o != id && kotlin.math.abs(l - lag) <= MASK_MERGE_MS }
                 if (dropOnMeasureCall?.first == id && dropOnMeasureCall.second == callNo) {
+                    null
+                } else if (id in silent) {
                     null
                 } else if (id in masked && !merged) {
                     null
@@ -129,7 +159,10 @@ class OrchestrationTest {
          *  level. A lag nobody is playing at reads ~1.0 (the correlation floor), which is what makes
          *  an absent speaker distinguishable instead of scoring like a present one. */
         override fun levelReader(): ((Double) -> Double) {
-            val live = intrinsic.mapValues { (id, base) -> base - (control.latency[id] ?: 0) }
+            val silent = silent()
+            val live = intrinsic
+                .filterKeys { it !in silent }
+                .mapValues { (id, base) -> base - (control.latency[id] ?: 0) }
             return { lag ->
                 val who = live.entries.minByOrNull { kotlin.math.abs(it.value - lag) }
                 if (who != null && kotlin.math.abs(who.value - lag) <= levelHalfMs) {
@@ -148,9 +181,10 @@ class OrchestrationTest {
             val call = measureCalls
             // A client dropped from this capture is gone from the timing correlation too — a
             // glitch silences the audio, not just the peak list.
+            val silent = silent()
             val live = intrinsic
                 .filterKeys {
-                    it !in probeVanishes &&
+                    it !in probeVanishes && it !in silent &&
                         !(dropOnMeasureCall?.first == it && dropOnMeasureCall?.second == call)
                 }
                 .mapValues { (id, base) -> base - (control.latency[id] ?: 0) }
@@ -166,7 +200,7 @@ class OrchestrationTest {
 
         /** The pre-salience-filter list: every client's arrival, masked ones at [maskedZ] — the
          *  sub-salient baseline structure the rescue anchors its windows on. */
-        override fun fullPeaks(): List<Dsp.Peak> = intrinsic.map { (id, base) ->
+        override fun fullPeaks(): List<Dsp.Peak> = (intrinsic - silent()).map { (id, base) ->
             Dsp.Peak(base - (control.latency[id] ?: 0), if (id in masked) maskedZ else z.getValue(id))
         }
 
@@ -383,7 +417,23 @@ class OrchestrationTest {
         // reflections over the floor too and degrades attribution (rig-measured).
         assertTrue("retry boosted to the ramp's first level", control.volumeCalls.contains(Triple("t", false, 60)))
         assertTrue("must not jump straight to the ceiling", control.volumeCalls.none { it == Triple("t", false, 75) })
-        assertEquals("last volume write restores the original", Triple("t", false, 50), control.volumeCalls.last())
+        // The BOOST is restored — which is not the same as "nothing is written afterwards". The
+        // end-of-run balance writes persistent volumes, and since this scene's sync completed via a
+        // boost, the levels-only recovery round runs and can legitimately feed it. What must hold
+        // is that no boost outlives the round: after the last write above 50 comes a restore.
+        val boostAt = control.volumeCalls.indexOfFirst { it == Triple("t", false, 60) }
+        assertTrue(
+            "the boost is restored to 50 before the run ends, got ${control.volumeCalls}",
+            control.volumeCalls.drop(boostAt + 1).contains(Triple("t", false, 50)),
+        )
+        // And nothing boosted survives INTO the levels-only round that follows: the last write
+        // before the balance's persistent one must be the restore, not a boost.
+        val balanceAt = control.volumeCalls.indexOfLast { it.first == "t" }
+        assertEquals(
+            "the levels round measured at the real gain",
+            Triple("t", false, 50),
+            control.volumeCalls.take(balanceAt).last { it.first == "t" },
+        )
     }
 
     @Test
@@ -454,7 +504,14 @@ class OrchestrationTest {
         assertEquals("reference boosted in the same lease", 60, osCalls.first().first["ref"])
         assertTrue("lease must be finite", osCalls.first().second > 0)
         assertTrue("released explicitly, not left to the lease", osCalls.last().first.isEmpty())
-        assertTrue("SW gain must not be touched — it has no headroom", control.volumeCalls.none { it.first == "t" })
+        // No SW BOOST — "t" is already at 100 %, so raising it would be a no-op, and that no-op is
+        // the whole reason the OS lever exists. The end-of-run balance may still write "t" a
+        // PERSISTENT volume, which is a different act: a boost can only ever go UP from where the
+        // client was, so any write at or below 100 is not one.
+        assertTrue(
+            "SW gain must not be raised for a boost — it has no headroom, got ${control.volumeCalls}",
+            control.volumeCalls.none { it.first == "t" && it.third > 100 },
+        )
     }
 
     @Test
@@ -666,6 +723,325 @@ class OrchestrationTest {
             assertTrue("both clients measured, got ${levels.keys}", levels.size == 2)
             assertEquals("the quieter client must read half", 0.5, levels.getValue("t") / levels.getValue("ref"), 1e-9)
         }
+    }
+
+    // ---- the boost gap ----------------------------------------------------------------
+    //
+    // A boosted round throws its levels away on purpose (a boosted speaker is louder than the SW
+    // gain the balance reasons about), so before the recovery round existed, any run that needed a
+    // boost to find a speaker ended with SYNC done and the balance silently doing nothing — in
+    // exactly the rooms that need balancing, since marginal detection means one speaker is far from
+    // the listener. Rig-observed twice on 2026-08-14.
+    //
+    // Every scene here makes audibility depend on VOLUME (`audibleAtLeastPercent`), not on a
+    // capture index, so a levels round that cheated by boosting would be visibly measuring a gain
+    // it is not allowed to reason about.
+
+    @Test
+    fun `a boosted sync round is followed by an unboosted levels round that balances`() = runTest {
+        // The gap, closed. "t" needs 60 % to be detectable at all but its real gain is 50 %, so the
+        // unboosted attempt fails, the 60 % retry completes sync, and the levels are disqualified —
+        // and then the recovery round runs with nothing boosted. It can measure here because the
+        // scene's floor (50 %) is exactly the real gain: the honest case where the speaker IS
+        // detectable at its own volume and only the boosted CAPTURES were inadmissible.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            audibleAtLeastPercent = mapOf("t" to 50),
+            // Kill only the FIRST round's baselines, so the unboosted attempt fails and the boosted
+            // retry succeeds. Audibility alone cannot do it: "t" is audible at its real 50 % here.
+            nullOnCalls = setOf(1, 2, 3),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        assertTrue("the retry was boosted", control.volumeCalls.contains(Triple("t", false, 60)))
+        val levels = cal.reduceLevels()
+        assertEquals("both clients must end up measured, got ${levels.keys}", 2, levels.size)
+        // The ratio the scene commanded, recovered — proof the levels came from unboosted captures.
+        // A round that harvested while boosted would read "t" at its boosted loudness instead.
+        assertEquals(0.5, levels.getValue("t") / levels.getValue("ref"), 1e-9)
+    }
+
+    @Test
+    fun `the levels round never boosts, and declines plainly when the speaker is unmeasurable`() = runTest {
+        // THE OBVIOUS TRAP, pinned. A levels-only round will often fail to detect the speaker,
+        // because failing to detect it is why the round was boosted in the first place, and the
+        // tempting fix — boost it again — is circular: it would measure a loudness that does not
+        // describe the gain the balance would then write.
+        //
+        // Here "t" is audible only at 60 %+ while its real gain is 50 %, so sync needs the boost and
+        // the levels round genuinely cannot hear it. The required outcome is no levels and NO boost
+        // during the recovery, not a balance built on boosted captures.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            audibleAtLeastPercent = mapOf("t" to 60),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        assertTrue("sync still needed its boost", control.volumeCalls.contains(Triple("t", false, 60)))
+        assertTrue(
+            "an undetectable speaker must not be balanced off nothing",
+            cal.reduceLevels().isEmpty(),
+        )
+        // The decisive assertion: after the LAST restore to the real gain, nothing raises it again.
+        // Being unable to measure is the honest ceiling; boosting to get a number is not.
+        val lastRestore = control.volumeCalls.indexOfLast { it == Triple("t", false, 50) }
+        assertTrue("the boost was restored at all", lastRestore >= 0)
+        assertTrue(
+            "the levels round must not re-boost to make itself succeed, got ${control.volumeCalls}",
+            control.volumeCalls.drop(lastRestore + 1).none { it.first == "t" && it.third > 50 },
+        )
+    }
+
+    @Test
+    fun `an unboosted run takes no levels round and is unchanged`() = runTest {
+        // The recovery is scoped to runs that actually needed a boost: an easy room must not pay
+        // ~100 s for a round it has no use for. Measured by capture count, which is what the wall
+        // clock is made of.
+        fun scene(): Pair<FakeControl, SceneMeasurer> {
+            val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+            return control to SceneMeasurer(
+                control,
+                intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+                z = mapOf("ref" to 40.0, "t" to 20.0),
+                level = mapOf("ref" to 1.0, "t" to 0.5),
+            )
+        }
+        val (control, measurer) = scene()
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(clients("ref" to 0, "t" to 0))
+        assertTrue("the easy path is not boosted", control.volumeCalls.none { it.third == 60 })
+        // 3 baselines + 6 harvest probes + verify baseline + verify probe = 11. The point is not
+        // the exact number but that no second round's worth of captures is hiding behind it.
+        assertEquals("no extra round on a run that never boosted", 11, measurer.measureCalls)
+    }
+
+    @Test
+    fun `the levels round probes from the verified trim, not the pre-run latency`() = runTest {
+        // The recovery re-probes AFTER sync committed a trim, so it must start from the trim. Using
+        // the pre-run latency would write `preRun − offset`, quietly undoing a correction the run
+        // just verified and leaving the room misaligned by exactly the trim — the balance getting
+        // fixed at the cost of the sync it depends on.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            audibleAtLeastPercent = mapOf("t" to 50),
+            nullOnCalls = setOf(1, 2, 3), // force the boosted retry
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        // "t" arrives 200 ms after "ref", so the verified trim is 200 — and the run must still end
+        // there after the levels round has probed and restored.
+        assertEquals("the verified trim survives the levels round", 200, control.latency["t"])
+        assertEquals("the reference is left where it started", 0, control.latency["ref"])
+    }
+
+    @Test
+    fun `a round that never measured its misalignment takes no levels round`() = runTest {
+        // The gate is a MEASURED standing misalignment, not merely a round that returned a summary.
+        // The implausible path returns one, and it throws away the only delta it had — so the pair
+        // geometry is unknown, and a levels round would pin its reads at an assumed spacing
+        // hundreds of ms from the truth and publish a confident wrong number. Worse than nothing.
+        //
+        // "t" sits 2 s from "ref" (a music self-similarity ghost, rig-caught 2026-08-03), which is
+        // past MAX_PLAUSIBLE_DELTA_MS.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 3000.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            audibleAtLeastPercent = mapOf("t" to 50),
+            nullOnCalls = setOf(1, 2, 3), // force the boosted retry
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        val text = (cal.state.value as? SyncCalibrator.State.Done)?.summary
+            ?: (cal.state.value as? SyncCalibrator.State.Failed)?.reason ?: ""
+        assertTrue("the scene must hit the implausible path, got: $text", text.contains("implausible"))
+        assertTrue(
+            "no levels may be harvested at a spacing nobody measured",
+            cal.reduceLevels().isEmpty(),
+        )
+        assertEquals("the implausible correction is never written", 0, control.latency["t"])
+    }
+
+    @Test
+    fun `the levels round recovers a masked reference through the window fallback`() = runTest {
+        // The 2026-08-14 rig shape end to end, which is the run that motivated this whole path: the
+        // reference is masked below the shared-capture correlation floor (its PHAT peak carries
+        // only its share of the energy), the unboosted attempt fails on it, a boost completes sync,
+        // and the levels then have to be recovered with nothing boosted.
+        //
+        // The load-bearing detail is that the levels round CANNOT use blind peak matching here. It
+        // runs on a pair sync has just aligned, so both speakers share one baseline cluster, and it
+        // is measuring a reference that is missing from the salient list by construction. Only the
+        // targeted window fallback can identify this pair — the same one the verify step uses.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1040.0),
+            z = mapOf("ref" to 30.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            masked = setOf("ref"),
+            maskedZ = 7.0, // rig-measured range for a real masked arrival: 6.5-9.0
+            audibleAtLeastPercent = mapOf("t" to 50),
+            nullOnCalls = setOf(1, 2, 3), // the unboosted attempt fails; the boosted retry works
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        assertTrue("sync needed the boost", control.volumeCalls.contains(Triple("t", false, 60)))
+        assertEquals("the true 40ms trim is still found and kept", 40, control.latency["t"])
+        val levels = cal.reduceLevels()
+        assertEquals("a masked reference must still be measured, got ${levels.keys}", 2, levels.size)
+        assertEquals(
+            "and at the commanded ratio, so the levels came from unboosted captures",
+            0.5,
+            levels.getValue("t") / levels.getValue("ref"),
+            1e-9,
+        )
+    }
+
+    @Test
+    fun `the levels round pins its reads using the standing misalignment, sign included`() = runTest {
+        // ARITHMETIC, not routing. Every other test here leaves the pair aligned to 0 ms by the
+        // time the levels round runs, so `spacingMs = (tgtOff - refOff) + standing` collapses to
+        // the offset difference and a wrong SIGN on the standing term would be invisible.
+        //
+        // Here the pair is deliberately left misaligned: "t" arrives 15 ms after "ref", which is
+        // inside DEADBAND_MS, so sync measures the 15 ms, declines to correct it, and leaves it
+        // standing. The levels round must expect its two arrivals 380 + 15 ms apart, not 380 - 15.
+        // Get the sign wrong and the derived seed lands 30 ms off, outside the fake's level-read
+        // half-width, and the quiet speaker reads the correlation floor instead of its own level.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1015.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            audibleAtLeastPercent = mapOf("t" to 50),
+            nullOnCalls = setOf(1, 2, 3), // the unboosted attempt fails; the boosted retry works
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        val text = (cal.state.value as? SyncCalibrator.State.Done)?.summary
+            ?: (cal.state.value as? SyncCalibrator.State.Failed)?.reason ?: ""
+        assertTrue("the scene must land in the deadband, got: $text", text.contains("deadband"))
+        assertEquals("a deadband round writes no trim", 0, control.latency["t"])
+        val levels = cal.reduceLevels()
+        assertEquals("both speakers measured off a misaligned pair, got ${levels.keys}", 2, levels.size)
+        assertEquals(
+            "the commanded ratio survives, so the seed lag carried the right sign",
+            0.5,
+            levels.getValue("t") / levels.getValue("ref"),
+            1e-9,
+        )
+    }
+
+    @Test
+    fun `the OS-volume boost is released before the levels round measures`() = runTest {
+        // The REFERENCE is boosted too (it must be found, not just corrected), and on this rig it
+        // sits at 100 % SW so it gets the OS-volume flavour — a lease the server cannot see, which
+        // is the worst kind to have outstanding while levels are read: the balance would reason
+        // about a SW gain that does not describe the loudness it measured.
+        //
+        // The release happens in the pair round's finally, so it is ordered before the levels round
+        // by construction. That ordering is the property worth pinning: it is invisible in the
+        // volume log (an OS boost writes no SW volume at all) and would be silently wrong if the
+        // recovery were ever hoisted out of the loop.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            nullOnCalls = setOf(1, 2, 3), // the unboosted attempt fails; the boosted retry works
+        )
+        // Record the capture count at each OS-boost event, so "released before measuring" can be
+        // checked against measurement progress rather than against wall-clock ordering.
+        val osEvents = mutableListOf<Pair<Boolean, Int>>() // (released, captures taken so far)
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            publishOsBoost = { targets, _ -> osEvents += targets.isEmpty() to measurer.measureCalls },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false), // SW maxed -> OS lever
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+            ),
+        )
+        assertTrue("an OS boost was leased", osEvents.any { !it.first })
+        val releasedAt = osEvents.last { it.first }.second
+        assertTrue("the lease was released, not left to expire", osEvents.last().first)
+        // Levels must come from captures taken AFTER that release. The run's total capture count
+        // exceeding the release point is what proves the levels round ran unboosted.
+        assertTrue(
+            "captures must continue after the release (releasedAt=$releasedAt, total=${measurer.measureCalls})",
+            measurer.measureCalls > releasedAt,
+        )
+        assertEquals("and those captures produced levels", 2, cal.reduceLevels().size)
     }
 
     // ---- end-of-run volume balance --------------------------------------------------

@@ -160,6 +160,13 @@ class SyncCalibrator(
      *  the user should go and move a speaker. */
     private var levelsSkippedForBoost = false
 
+    /** True once [harvestLevelsUnboosted] has actually run for some target this run. Separates the
+     *  two ways a boosted run can end with no levels — "nothing tried to recover them" from "the
+     *  recovery ran and the speaker was not measurable at its real volume" — which are different
+     *  problems with different user actions, and the whole point of the recovery is that the second
+     *  one gets SAID rather than looking like the first. */
+    private var levelRecoveryAttempted = false
+
 
     /** A FINAL latency write (commit or restore) — records it for run-level read-back.
      *  Transient probe writes use [control].sendSetLatency directly and are not recorded. */
@@ -206,6 +213,7 @@ class SyncCalibrator(
         levelCaptures.clear()
         levelCaptureSwapSuspect.clear()
         levelsSkippedForBoost = false
+        levelRecoveryAttempted = false
         val ring = ReferencePcmRing()
         val measurer = measurerFactory?.invoke(ring) ?: micMeasurer(ring)
         // Journal every client's pre-run latency AND volume BEFORE the first mutating write, so
@@ -289,19 +297,65 @@ class SyncCalibrator(
             // therefore not monotonically better: past the floor it degrades attribution. So try the
             // modest level first and escalate only if that failed to find the speaker at all.
             var outcome = mutedPairRound(measurer, reference, target, others, boostPercent = null)
+            var boosted = false
             if (outcome == null && canBoost(target)) {
                 for (level in BOOST_RAMP_PERCENT) {
                     progress("${target.name}: retrying with a $level% detectability boost")
                     outcome = mutedPairRound(measurer, reference, target, others, boostPercent = level)
-                    if (outcome != null) break
+                    if (outcome != null) {
+                        boosted = true
+                        break
+                    }
                 }
             }
+            // THE BOOST GAP. A boosted round throws its loudness readings away on purpose (a
+            // boosted speaker is louder than the SW gain the balance reasons about), so up to here
+            // the run has calibrated SYNC and left the balance with nothing — in exactly the rooms
+            // that need balancing most, since a room where detection is marginal is a room where
+            // one speaker is much further from the listener than the other. Easy rooms barely need
+            // balancing; hard ones silently got none.
+            //
+            // What the boost bought is the TIMING, and timing is the expensive half: the two
+            // arrivals' separation under the level probe set is now known before a single capture
+            // is taken. Levels are the only thing missing, and they need the speakers at their real
+            // gains — so take one more round with nothing boosted anywhere.
+            //
+            // Gated on a MEASURED standing misalignment, not merely on the round returning a
+            // summary: the implausible and deferred paths also return one, and they leave a
+            // standing error nobody measured. Harvesting at an assumed spacing then reads the quiet
+            // speaker at a lag hundreds of ms off — a confident wrong number, which is worse than
+            // today's silent nothing.
+            val standing = outcome?.standingMisalignmentMs
+            if (boosted && standing != null && outcome != null) {
+                harvestLevelsUnboosted(
+                    measurer, reference, target, others, outcome.targetLatencyMs, standing,
+                )
+            }
             if (outcome != null) successes++
-            results += outcome ?: "${target.name}: failed (see log)"
+            results += outcome?.summary ?: "${target.name}: failed (see log)"
         }
         finish(successes > 0, results.joinToString("; "))
         return successes == targets.size
     }
+
+    /**
+     * What a pair round achieved, beyond the human summary that used to be its whole return value.
+     *
+     * [standingMisalignmentMs] is the target-minus-reference arrival difference REMAINING at the
+     * latencies this round left committed, and it is non-null only on the two paths that actually
+     * measured it: the verified trim (its re-measured residual) and the deadband (the delta it
+     * deliberately declined to act on). The implausible-delta and history-deferred paths return a
+     * summary and NO misalignment on purpose — both end with a standing error nobody established,
+     * so a follow-up round must not assume it knows where the two arrivals sit.
+     */
+    private data class PairResult(
+        val summary: String,
+        /** The latency the target is LEFT AT — the new trim on a verified round, its pre-run value
+         *  on every other path. A follow-up round must probe from here; probing from
+         *  `target.latencyMs` would quietly undo a trim this round just verified. */
+        val targetLatencyMs: Int,
+        val standingMisalignmentMs: Int?,
+    )
 
     /** True if [target] has any loudness headroom left to give (and may be touched at all).
      *  A user mute is explicit intent — R6: we exclude such a client, never unmute it. */
@@ -332,7 +386,7 @@ class SyncCalibrator(
         target: CalClient,
         others: List<CalClient>,
         boostPercent: Int?,
-    ): String? {
+    ): PairResult? {
         // Knob selection: use whichever stage of the gain chain actually has headroom. The SW gain
         // is server-side, instant and non-intrusive, so prefer it — but it sits at 100% by default,
         // and then the ONLY headroom is the client's own OS media volume (which drives its paired BT
@@ -391,7 +445,7 @@ class SyncCalibrator(
         reference: CalClient,
         target: CalClient,
         harvestLevels: Boolean = false,
-    ): String? {
+    ): PairResult? {
         // REPEAT THE BASELINE, not just the probe. Rig-measured: five identical baseline captures
         // put the two speakers' peak SPACING — which is exactly what the delta is made of — at
         // 37.6/41.0/45.8/54.3/71.5 ms, a 34 ms wander with nothing changed. That single number
@@ -495,22 +549,6 @@ class SyncCalibrator(
         /** Probe captures that already produced a level candidate. */
         val levelledCaptures = mutableSetOf<Int>()
 
-        /**
-         * One capture's raw material for a level pair: the reader bound to that capture plus the
-         * two arrivals as this capture SAW them. Levels are not read here — see the pinned harvest
-         * after the consensus delta, which is what makes a quiet speaker measurable at all.
-         */
-        data class LevelCand(
-            val capture: Int,
-            val read: (Double) -> Double,
-            /** Locates the actual correlation peak near a lag, so BOTH arrivals can be read at a
-             *  peak of their own signal rather than one at a peak and one at a derived position. */
-            val peak: ((Double, Double) -> Dsp.Peak?)?,
-            val refLagMs: Double,
-            val tgtLagMs: Double,
-            val refZ: Double,
-            val tgtZ: Double,
-        )
         val levelCands = mutableListOf<LevelCand>()
         // HARVEST ROUNDS TAKE TWICE THE CAPTURES, because the level estimator is far noisier per
         // capture than the sync estimator and the balance is the thing being starved.
@@ -706,50 +744,7 @@ class SyncCalibrator(
         // `levelAt` still takes its max over ±3 ms, so a small per-capture wobble is absorbed
         // without letting the read wander onto a neighbouring arrival.
         if (harvest) {
-            val spacingMs = (tgtOff - refOff) + deltaMs
-            for (c in levelCands.sortedBy { it.capture }) {
-                val anchorOnRef = c.refZ >= c.tgtZ
-                val refSeed = if (anchorOnRef) c.refLagMs else c.tgtLagMs - spacingMs
-                val tgtSeed = if (anchorOnRef) c.refLagMs + spacingMs else c.tgtLagMs
-                // SYMMETRIC SELECTION. Both arrivals are re-located as the peak of their own
-                // correlation before their level is read, even though one of the two seeds is
-                // already a matched peak.
-                //
-                // Otherwise the anchor is read at a lag that was CHOSEN by maximising that
-                // speaker's own signal while the other is read at a merely derived lag, and a
-                // selected maximum is biased upward. The ratio then inflates whichever speaker
-                // anchored, and the balance duly attenuates it. Rig-measured 2026-08-11 iteration
-                // 1: ONEPLUS anchored in all six captures, its readings varied 2.1x (5.4-11.5e-05)
-                // while the derived PFFM10 stayed inside 3.5-4.9e-05, the ratio over-read by
-                // 2.6 dB against an independent solo measurement, and two runs walked the speaker
-                // 3.7 dB past even. Same family as the settled "a peak's z is not a level" trap:
-                // select a maximum, then read its value, and the selection is in the answer.
-                val refLag = c.peak?.invoke(refSeed, LEVEL_PEAK_FIND_MS)?.lagMs ?: refSeed
-                val tgtLag = c.peak?.invoke(tgtSeed, LEVEL_PEAK_FIND_MS)?.lagMs ?: tgtSeed
-                // Geometry check, on the SEEDS (what this capture actually matched) rather than
-                // on the derived pair, which is consistent by construction and so proves nothing.
-                val seedSpacing = c.tgtLagMs - c.refLagMs
-                val swapSuspect = abs(seedSpacing - spacingMs) > SWAP_GEOMETRY_TOL_MS
-                val rl = c.read(refLag)
-                val tl = c.read(tgtLag)
-                Log.i(
-                    TAG,
-                    "level capture ${levelCaptures.size}: " +
-                        "${reference.name}@%.1fms=%.3e ".format(refLag, rl) +
-                        "${target.name}@%.1fms=%.3e ".format(tgtLag, tl) +
-                        "delta=%+.1fdB (anchored on %s, spacing %.0fms, seed %.0fms%s)".format(
-                            if (rl > 0.0 && tl > 0.0) 20.0 * log10(tl / rl) else 0.0,
-                            if (anchorOnRef) reference.name else target.name,
-                            spacingMs.toDouble(),
-                            seedSpacing,
-                            if (swapSuspect) " SWAP-SUSPECT" else "",
-                        ),
-                )
-                if (rl > 0.0 && tl > 0.0) {
-                    levelCaptures += mapOf(reference.id to rl, target.id to tl)
-                    levelCaptureSwapSuspect += swapSuspect
-                }
-            }
+            harvestPinned(reference, target, levelCands, ((tgtOff - refOff) + deltaMs).toDouble())
         }
         // PLAUSIBILITY FIRST. A delta larger than any real sink gap means the target was matched to
         // a ghost, and it must be thrown out before anything else looks at it.
@@ -764,7 +759,14 @@ class SyncCalibrator(
         // applying a two-second correction, which is audible catastrophe rather than a bad trim.
         if (abs(deltaMs) > MAX_PLAUSIBLE_DELTA_MS) {
             commitLatency(target.id, target.latencyMs)
-            return "${target.name}: implausible Δ${deltaMs}ms — skipped (suspected mis-attribution)"
+            // NO standing misalignment: the delta this path throws away is the only estimate the
+            // round had, so what the two arrivals are really doing is unknown. A follow-up levels
+            // round must not assume it.
+            return PairResult(
+                "${target.name}: implausible Δ${deltaMs}ms — skipped (suspected mis-attribution)",
+                target.latencyMs,
+                standingMisalignmentMs = null,
+            )
         }
         // DAMPING: distrust a correction that contradicts this sink's own recent history by more
         // than the measurement can resolve. A single run is one noisy sample, so without this the
@@ -775,8 +777,13 @@ class SyncCalibrator(
             val prior = recent.sorted()[recent.size / 2]
             if (abs(deltaMs - prior) > DAMPING_TOL_MS) {
                 commitLatency(target.id, target.latencyMs)
-                return "${target.name}: Δ${deltaMs}ms disagrees with recent history (~${prior}ms) — " +
-                    "deferred, re-run to confirm"
+                // Deferred means "this measurement is not trusted", so it is not geometry either.
+                return PairResult(
+                    "${target.name}: Δ${deltaMs}ms disagrees with recent history (~${prior}ms) — " +
+                        "deferred, re-run to confirm",
+                    target.latencyMs,
+                    standingMisalignmentMs = null,
+                )
             }
         }
         if (abs(deltaMs) <= DEADBAND_MS) {
@@ -785,7 +792,13 @@ class SyncCalibrator(
             // the movedBy step can't tell reference from target — a false "could not
             // identify". Leave the latency untouched and report aligned.
             commitLatency(target.id, target.latencyMs)
-            return "${target.name}: already aligned (Δ${deltaMs}ms within deadband)"
+            // The delta stands as the measured misalignment: it was believed enough to decide no
+            // correction was warranted, and the target is left exactly where it was measured.
+            return PairResult(
+                "${target.name}: already aligned (Δ${deltaMs}ms within deadband)",
+                target.latencyMs,
+                standingMisalignmentMs = deltaMs,
+            )
         }
 
         // Verify by re-measuring the residual: apply the correction, then run another
@@ -857,8 +870,263 @@ class SyncCalibrator(
         }
         commitLatency(target.id, newLatency) // remove verify probe → aligned
         history?.record(target.id, deltaMs, newLatency)
-        return "${target.name}: ${if (deltaMs == 0) "already aligned" else "trim ${deltaMs}ms"} " +
-            "(latency $newLatency, residual ${residualMs}ms, verified)"
+        return PairResult(
+            "${target.name}: ${if (deltaMs == 0) "already aligned" else "trim ${deltaMs}ms"} " +
+                "(latency $newLatency, residual ${residualMs}ms, verified)",
+            newLatency,
+            // The re-measured residual, not the delta: the trim has been applied, so THIS is what
+            // is left between the two arrivals at the latency the target is committed to.
+            standingMisalignmentMs = residualMs,
+        )
+    }
+
+
+    // ---- pair-round building blocks --------------------------------------------------
+    //
+    // Extracted so the sync round ([calibratePair]) and the levels-only round
+    // ([harvestLevelsUnboosted]) share ONE implementation of the delicate parts: how a probed
+    // capture is attributed, how a masked reference is rescued, and how a level pair is read at
+    // pinned lags. A second copy of any of these would drift from the first, and every one of them
+    // encodes a rig failure that took days to find.
+
+    /**
+     * One capture's raw material for a level pair: the readers bound to that capture plus the two
+     * arrivals as this capture SAW them. Levels are not read here — see [harvestPinned], whose
+     * pinned re-read is what makes a quiet speaker measurable at all.
+     */
+    private data class LevelCand(
+        val capture: Int,
+        val read: (Double) -> Double,
+        /** Locates the actual correlation peak near a lag, so BOTH arrivals can be read at a
+         *  peak of their own signal rather than one at a peak and one at a derived position. */
+        val peak: ((Double, Double) -> Dsp.Peak?)?,
+        val refLagMs: Double,
+        val tgtLagMs: Double,
+        val refZ: Double,
+        val tgtZ: Double,
+    )
+
+    /**
+     * PINNED LEVEL HARVEST — read each capture at ONE searched lag and one DERIVED lag, and append
+     * the pairs to [levelCaptures] / [levelCaptureSwapSuspect] (always both, never one).
+     *
+     * Reading both arrivals where each capture happened to match them is what broke the balance on
+     * a genuinely lopsided room (rig 2026-08-11 01:54, ONEPLUS 12.4 dB down): the quiet speaker's
+     * peak cannot be located reliably capture to capture — it was matched at 1765.9 ms in one and
+     * 1691.8 ms in the next, 74 ms apart — and a level read at the wrong lag is a wrong level. The
+     * two captures reported −8.7 dB and −1.2 dB for a room an independent capture measured at
+     * −7.23 dB, so the agreement gate declined, correctly and uselessly.
+     *
+     * The geometry is known better than any single capture knows it, which is what [spacingMs]
+     * carries: within one capture the two arrivals are separated by (tgtOff − refOff) plus the
+     * pair's misalignment. So anchor on whichever arrival that capture saw MORE SALIENTLY — the
+     * loud speaker, whose peak is never in doubt — and derive the other from that spacing. This is
+     * exactly the pinned-lag method that made the offline grader trustworthy at this imbalance
+     * (`scratchpad/grade.py`, which tracked a commanded 12.4 dB step to 0.08 dB while a blind top-2
+     * search could not find the quiet speaker at all).
+     *
+     * `levelAt` still takes its max over ±3 ms, so a small per-capture wobble is absorbed without
+     * letting the read wander onto a neighbouring arrival.
+     */
+    private fun harvestPinned(
+        reference: CalClient,
+        target: CalClient,
+        cands: List<LevelCand>,
+        spacingMs: Double,
+    ) {
+        for (c in cands.sortedBy { it.capture }) {
+            val anchorOnRef = c.refZ >= c.tgtZ
+            val refSeed = if (anchorOnRef) c.refLagMs else c.tgtLagMs - spacingMs
+            val tgtSeed = if (anchorOnRef) c.refLagMs + spacingMs else c.tgtLagMs
+            // SYMMETRIC SELECTION. Both arrivals are re-located as the peak of their own
+            // correlation before their level is read, even though one of the two seeds is
+            // already a matched peak.
+            //
+            // Otherwise the anchor is read at a lag that was CHOSEN by maximising that
+            // speaker's own signal while the other is read at a merely derived lag, and a
+            // selected maximum is biased upward. The ratio then inflates whichever speaker
+            // anchored, and the balance duly attenuates it. Rig-measured 2026-08-11 iteration
+            // 1: ONEPLUS anchored in all six captures, its readings varied 2.1x (5.4-11.5e-05)
+            // while the derived PFFM10 stayed inside 3.5-4.9e-05, the ratio over-read by
+            // 2.6 dB against an independent solo measurement, and two runs walked the speaker
+            // 3.7 dB past even. Same family as the settled "a peak's z is not a level" trap:
+            // select a maximum, then read its value, and the selection is in the answer.
+            val refLag = c.peak?.invoke(refSeed, LEVEL_PEAK_FIND_MS)?.lagMs ?: refSeed
+            val tgtLag = c.peak?.invoke(tgtSeed, LEVEL_PEAK_FIND_MS)?.lagMs ?: tgtSeed
+            // Geometry check, on the SEEDS (what this capture actually matched) rather than
+            // on the derived pair, which is consistent by construction and so proves nothing.
+            val seedSpacing = c.tgtLagMs - c.refLagMs
+            val swapSuspect = abs(seedSpacing - spacingMs) > SWAP_GEOMETRY_TOL_MS
+            val rl = c.read(refLag)
+            val tl = c.read(tgtLag)
+            Log.i(
+                TAG,
+                "level capture ${levelCaptures.size}: " +
+                    "${reference.name}@%.1fms=%.3e ".format(refLag, rl) +
+                    "${target.name}@%.1fms=%.3e ".format(tgtLag, tl) +
+                    "delta=%+.1fdB (anchored on %s, spacing %.0fms, seed %.0fms%s)".format(
+                        if (rl > 0.0 && tl > 0.0) 20.0 * log10(tl / rl) else 0.0,
+                        if (anchorOnRef) reference.name else target.name,
+                        spacingMs,
+                        seedSpacing,
+                        if (swapSuspect) " SWAP-SUSPECT" else "",
+                    ),
+            )
+            if (rl > 0.0 && tl > 0.0) {
+                levelCaptures += mapOf(reference.id to rl, target.id to tl)
+                levelCaptureSwapSuspect += swapSuspect
+            }
+        }
+    }
+
+    /**
+     * LEVELS-ONLY ROUND: re-measure [target] against [reference] with NOTHING boosted anywhere, so
+     * a run whose sync needed a detectability boost can still balance. Closes the boost gap.
+     *
+     * Only the LEVELS are missing by the time this runs. The boosted round bought the timing, and
+     * timing is the expensive half — [standingMisalignmentMs] is what the pair has left at the
+     * latencies it is committed to, so the separation the two arrivals will show under the level
+     * probe set is known before the first capture is taken, and no delta is re-derived here. That
+     * is also why one baseline capture is enough where a sync round takes three: a sync round
+     * repeats the baseline because the baseline's own noise IS the delta's noise (five identical
+     * captures spanned 34 ms of peak spacing) and it is about to act on that delta, whereas here
+     * the baseline is only the origin the probed peaks are matched against.
+     *
+     * THE ONE THING IT MUST NOT DO IS BOOST. The speaker is hard to detect — that is why the sync
+     * round was boosted — so boosting it again to make the levels harvestable would measure a gain
+     * the balance is not allowed to reason about, which is the exact disqualification this round
+     * exists to work around. The honest ceiling is therefore: the balance works when the speakers
+     * are detectable at their real gains, and says so plainly when they are not. Expect this round
+     * to decline sometimes; a stated decline is a large improvement on a silent nothing.
+     *
+     * Everything it writes is transient and restored in the finally: the target goes back to
+     * [targetLatencyMs] (the trim the sync round just verified — NOT its pre-run latency, which
+     * would undo that trim), the reference to its own, and any muted others are unmuted.
+     */
+    private suspend fun harvestLevelsUnboosted(
+        measurer: Measurer,
+        reference: CalClient,
+        target: CalClient,
+        others: List<CalClient>,
+        targetLatencyMs: Int,
+        standingMisalignmentMs: Int,
+    ): Boolean {
+        val probeSet = levelProbeSet(2)
+        if (probeSet == null) {
+            Log.i(
+                TAG,
+                "balance: no levels-only round for ${target.name} — no probe set separates " +
+                    "2 speakers within the ${MAX_VERIFIED_PROBE_MS}ms verified write envelope",
+            )
+            return false
+        }
+        levelRecoveryAttempted = true
+        val refOff = probeSet[0]
+        val tgtOff = probeSet[1]
+        val spacingMs = (tgtOff - refOff) + standingMisalignmentMs
+        val before = levelCaptures.size
+        try {
+            // [others] is empty in practice — this round is only reached from the N=2 pair loop —
+            // so the muting is structural symmetry with [mutedPairRound] rather than something that
+            // fires today. Kept because the loop it hangs off is written generically, and a levels
+            // round that let a third speaker play would harvest a two-client pair out of a
+            // three-speaker capture.
+            if (others.isNotEmpty()) {
+                progress("muting ${others.size} other client(s) to read levels")
+                others.forEach { control.sendSetVolume(it.id, muted = true, percent = it.volumePercent) }
+            }
+            // SETTLE UNCONDITIONALLY, and specifically for the BOOST RELEASE that just happened.
+            // This round's whole premise is that nothing is boosted while it measures, and the
+            // slowest restore in the system is the one most likely to be outstanding: the reference
+            // on this rig sits at 100% SW, so it gets the OS-volume flavour, whose release is a
+            // metadata publish that a client's AudioManager acts on at its own pace. The single
+            // baseline capture below would mostly cover it by accident; relying on that would make
+            // this round's correctness depend on how long a capture happens to take.
+            delay(SETTLE_MS)
+            progress("${target.name}: sync used a boost — re-reading levels at the real volumes…")
+            // ONE baseline, and it is used the way the VERIFY step uses its baseline, not the way
+            // a sync round uses its own. That difference is forced by the physics of an aligned
+            // pair, and getting it wrong is silent: after sync has done its job both speakers
+            // arrive at nearly the same lag, so they collapse into ONE baseline cluster, and
+            // [PeakAttribution.attribute] spends each baseline cluster on at most one entity — the
+            // reference claims it and the target is reported missing, every capture, forever. The
+            // verify step already faced exactly this ("an aligned pair coincides in the verify
+            // baseline (one merged cluster) and both probed peaks trace to it") and answers it with
+            // [PeakAttribution.assignVerifyPair], which assigns the two probed peaks to distinct
+            // clusters and lets them share a baseline origin. A levels round runs on an aligned
+            // pair by construction, so it must use that matcher.
+            val vBase = measurer.measure(PAIR_PEAKS, sources = 2)
+            if (vBase == null) {
+                Log.w(TAG, "balance: levels-only round for ${target.name} — baseline measurement failed")
+                return false
+            }
+            val vBaseFull = measurer.fullPeaks() ?: vBase
+            // Log the values actually WRITTEN, not just the offsets: a probe writes latency −
+            // offset, so a client already sitting at a negative latency can be pushed past
+            // MAX_VERIFIED_PROBE_MS in absolute terms even though the offset itself is inside it
+            // (the ONEPLUS at −99 ms took −479 ms for a 380 ms probe). If a rig run fails here,
+            // this line is what says whether the write was the reason.
+            val refProbe = reference.latencyMs - refOff
+            val tgtProbe = targetLatencyMs - tgtOff
+            progress("${target.name}: probing for levels…")
+            Log.i(
+                TAG,
+                "balance: levels-only probe ${reference.name}→${refProbe}ms " +
+                    "${target.name}→${tgtProbe}ms (offsets $refOff/$tgtOff, " +
+                    "expected spacing ${spacingMs}ms from a standing ${standingMisalignmentMs}ms)",
+            )
+            control.sendSetLatency(reference.id, refProbe)
+            control.sendSetLatency(target.id, tgtProbe)
+            delay(SETTLE_MS)
+            // Six probed captures, same count a harvest round takes and for the same reason: the
+            // level estimator is noisy per capture (8-13 dB between consecutive captures of one
+            // speaker at a fixed gain, rig 2026-08-11), so MIN_LEVEL_SAMPLES needs the yield.
+            val cands = mutableListOf<LevelCand>()
+            repeat(PROBE_REPEATS * 2) { attempt ->
+                val probed = measurer.measure(PAIR_PEAKS, sources = 2)
+                val read = measurer.levelReader()
+                val peak = measurer.timingReader()
+                if (probed != null && read != null) {
+                    // The targeted window fallback is the LIKELY path here, not an edge case: the
+                    // reference masked below the shared-capture correlation floor is exactly what
+                    // failed on the rig on 2026-08-14, and it is why this round exists at all.
+                    val pair = PeakAttribution.assignVerifyPair(probed, vBase, refOff, tgtOff, MATCH_TOL_MS)
+                        ?: PeakAttribution.assignVerifyPairWithWindows(
+                            probed, vBase, vBaseFull, refOff, tgtOff, MATCH_TOL_MS, RESCUE_MIN_Z, peak,
+                        )
+                    if (pair != null) {
+                        val (r, t) = pair
+                        cands += LevelCand(attempt, read, peak, r.lagMs, t.lagMs, r.z, t.z)
+                    } else {
+                        Log.i(
+                            TAG,
+                            "balance: levels-only capture $attempt could not identify the pair — " +
+                                "at their real volumes one speaker is under the floor",
+                        )
+                    }
+                }
+                if (attempt < PROBE_REPEATS * 2 - 1) {
+                    progress("levels capture ${attempt + 2}/${PROBE_REPEATS * 2}…")
+                }
+            }
+            harvestPinned(reference, target, cands, spacingMs.toDouble())
+        } finally {
+            commitLatency(reference.id, reference.latencyMs)
+            commitLatency(target.id, targetLatencyMs)
+            others.forEach { control.sendSetVolume(it.id, muted = it.muted, percent = it.volumePercent) }
+        }
+        val gained = levelCaptures.size - before
+        if (gained == 0) {
+            Log.w(
+                TAG,
+                "balance: levels-only round for ${target.name} harvested nothing — at their real " +
+                    "volumes the speakers did not clear the measurement floor. This is the expected " +
+                    "decline, not a fault: the boost that found them for sync is not available here.",
+            )
+        } else {
+            Log.i(TAG, "balance: levels-only round for ${target.name} harvested $gained capture(s)")
+        }
+        return gained > 0
     }
 
     // ---- v2 strategy: simultaneous probes, nothing muted ---------------------------
@@ -1133,9 +1401,16 @@ class SyncCalibrator(
                 val others = targets.filter { it.id != target.id }
                 // Boost here: this round only runs because the batch already failed to attribute
                 // the target, and the others are muted for it anyway.
+                // No boost-gap recovery round here, deliberately. Every fallback round is boosted
+                // (the batch only degrades to one after attribution already failed), so a recovery
+                // would fire on every 3+ client run and spend ~100 s per target producing TWO-client
+                // captures of a room with three speakers in it — which [reduceLevels] would then
+                // centre on a two-client mean and balance those two against each other. The batch
+                // has no usable balance at 3+ clients anyway ([levelProbeSet] declines the 940 ms
+                // excursion), so there is nothing here to recover.
                 val outcome = mutedPairRound(measurer, reference, target, others, boostPercent = BOOST_RAMP_PERCENT.first())
                 if (outcome != null) succeeded += target.id else errored += target.id
-                outcomes[target.id] = outcome ?: "${target.name}: failed (see log)"
+                outcomes[target.id] = outcome?.summary ?: "${target.name}: failed (see log)"
             }
             // Targeted rescue for web clients the batch couldn't attribute. They have no muted
             // fallback and no OS volume of their own, so without this a single noisy capture ends
@@ -1148,7 +1423,7 @@ class SyncCalibrator(
                     boostPercent = BOOST_RAMP_PERCENT.last(),
                 )
                 if (outcome != null) succeeded += target.id
-                outcomes[target.id] = outcome
+                outcomes[target.id] = outcome?.summary
                     ?: "${target.name}: too quiet to measure even at the boost ceiling — " +
                     "move it closer or raise its device volume, then re-run"
             }
@@ -1290,7 +1565,7 @@ class SyncCalibrator(
 
     /** Restores the target's latency and reports the failure; terminal state is decided by
      *  the pair loop (other targets may still succeed). */
-    private suspend fun failPair(target: CalClient, reason: String): String? {
+    private suspend fun failPair(target: CalClient, reason: String): PairResult? {
         Log.w(TAG, "pair ${target.name} failed: $reason — restoring latency ${target.latencyMs}")
         commitLatency(target.id, target.latencyMs)
         progress("${target.name}: $reason")
@@ -1362,11 +1637,25 @@ class SyncCalibrator(
             // Heard fine, but every round that got far enough had been BOOSTED for detectability,
             // and a boosted round's levels are disqualified on purpose. Saying "not detected" here
             // sends the user to move speakers or raise volume when nothing is wrong with either.
+            //
+            // Two different endings, and the difference is what the user should do about it. If the
+            // levels-only recovery round RAN and still came back empty, the speakers genuinely are
+            // not measurable at their real volumes — the run has done everything it can and the
+            // remaining levers are physical (move the speaker, raise its device volume). If it
+            // never ran, the round ended on a path that left the pair's misalignment unmeasured,
+            // so there was no geometry to harvest at and re-running is the useful advice.
             Log.i(
                 TAG,
-                "balance: no levels this run — every round that completed was boosted for " +
-                    "detectability, and a boosted speaker's level does not describe its SW gain. " +
-                    "Re-run once the speakers are detectable unboosted.",
+                if (levelRecoveryAttempted) {
+                    "balance: no levels this run — sync needed a detectability boost, and the " +
+                        "levels-only round that followed could not hear the speakers at their " +
+                        "real volumes. Raise the device volume or move the quiet speaker closer, " +
+                        "then re-run."
+                } else {
+                    "balance: no levels this run — every round that completed was boosted for " +
+                        "detectability, and a boosted speaker's level does not describe its SW " +
+                        "gain. Re-run once the speakers are detectable unboosted."
+                },
             )
         } else if (undetected.isNotEmpty()) {
             Log.w(
