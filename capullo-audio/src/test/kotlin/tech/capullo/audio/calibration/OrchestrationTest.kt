@@ -1044,6 +1044,64 @@ class OrchestrationTest {
         assertEquals("and those captures produced levels", 2, cal.reduceLevels().size)
     }
 
+    @Test
+    fun `a levels round that harvests too few captures declines instead of balancing`() = runTest {
+        // THE SHAPE THE RIG ACTUALLY PRODUCED (2026-08-18, `decline-run2-20260818.log`), and the one
+        // no other test covers. The two clean outcomes — harvest enough, or harvest nothing — are
+        // both pinned elsewhere. Reality landed between them: of six levels captures, four could not
+        // identify the pair and ONE survived, so the round did not take the zero-harvest branch at
+        // all. It reached MIN_LEVEL_SAMPLES with a single sample and declined there.
+        //
+        // That distinction matters because the two paths decline for different reasons and only one
+        // of them is the purpose-written "harvested nothing" message. A partial harvest is the
+        // likelier real-world case (detection is marginal, not absent — that is what "marginal"
+        // means), so the gate behind it has to hold on its own.
+        //
+        // Modelled by killing all but one of the recovery's probe captures. The run: 3 baselines
+        // (1-3) + 6 probes (4-9) + verify baseline (10) + verify probe (11) for the boosted sync
+        // round, then the recovery's 1 baseline (12) + 6 probes (13-18). Killing 14-18 leaves
+        // exactly one usable levels capture, which is 1 < MIN_LEVEL_SAMPLES.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            audibleAtLeastPercent = mapOf("t" to 50),
+            nullOnCalls = setOf(1, 2, 3) + (14..18).toSet(),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        assertTrue("the scene must still reach the recovery", control.volumeCalls.contains(Triple("t", false, 60)))
+        // ONE capture is evidence of nothing: a median of one is that one reading, and the whole
+        // reason MIN_LEVEL_SAMPLES is 3 is that a single level capture on this rig has been observed
+        // 8-13 dB from its neighbour. It must not reach VolumeBalance.
+        assertTrue(
+            "a single capture must not produce a level, got ${cal.reduceLevels()}",
+            cal.reduceLevels().isEmpty(),
+        )
+        // And nothing may be written off it. This is the assertion that would have caught a balance
+        // acting on thin evidence — the failure mode the gate exists for.
+        val tWrites = control.volumeCalls.filter { it.first == "t" }
+        assertEquals(
+            "the target must end at its real gain, not a balanced one",
+            50,
+            tWrites.last().third,
+        )
+        assertTrue(
+            "the reference must not be re-levelled off one capture either",
+            control.volumeCalls.none { it.first == "ref" && it.third != 100 },
+        )
+    }
+
     // ---- end-of-run volume balance --------------------------------------------------
 
     @Test
