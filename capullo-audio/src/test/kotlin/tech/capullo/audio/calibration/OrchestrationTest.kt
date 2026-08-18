@@ -1102,6 +1102,93 @@ class OrchestrationTest {
         )
     }
 
+    @Test
+    fun `a healthy levels round stops early instead of taking every probe`() = runTest {
+        // COST, not correctness — but asserted on capture COUNT, which is what the wall clock is
+        // actually made of. The levels round buys 6 probes assuming only ~65 % attribute; the two
+        // healthy rig runs of 2026-08-14 yielded 6 of 6, so a good room paid 24 s for samples it
+        // already had.
+        //
+        // Safe only here: this round re-derives no delta (its spacing was fixed before the first
+        // capture), so an unused capture banks nothing but precision the estimator has already
+        // declared sufficient. The same cut in a sync round would weaken the correction it writes.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            audibleAtLeastPercent = mapOf("t" to 50),
+            nullOnCalls = setOf(1, 2, 3), // force the boosted retry, so the recovery runs
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        // Measured against the unoptimised code, this scene took 18 captures; the early exit makes
+        // it 16. The exact numbers matter less than that it is FEWER and that the balance below
+        // still resolves — but pinning them is what would catch the exit silently ceasing to fire.
+        assertEquals(
+            "the healthy recovery must stop early, got ${measurer.measureCalls} captures",
+            16,
+            measurer.measureCalls,
+        )
+        val levels = cal.reduceLevels()
+        assertEquals("both clients still measured", 2, levels.size)
+        assertEquals(
+            "the commanded ratio survives the shortened round",
+            0.5,
+            levels.getValue("t") / levels.getValue("ref"),
+            1e-9,
+        )
+    }
+
+    @Test
+    fun `a harvest round with no evidence abandons its extra captures`() = runTest {
+        // A harvest round takes double probes to feed the LEVELS. A round that cannot attribute
+        // harvests no levels at all, so on a failing round those extra captures buy nothing and
+        // cost 36 s — and a boosted run pays exactly this on its first round by construction, since
+        // the unboosted attempt failing is what triggers the boost. Both failed attempts of
+        // 2026-08-18 spent all six probes to produce zero samples and zero rescue candidates.
+        //
+        // "t" is inaudible below 60 % and sits at 50 %, so the unboosted harvest round can attribute
+        // nothing whatsoever — the case this cut is for.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0), gains = mapOf("t" to 50))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+            audibleAtLeastPercent = mapOf("t" to 60),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 50, false),
+            ),
+        )
+        // 24 captures before the cut, 21 after: the hopeless round gives up its last three probes.
+        assertEquals(
+            "the hopeless harvest round must not take all six probes, got ${measurer.measureCalls}",
+            21,
+            measurer.measureCalls,
+        )
+        // Cutting it short must not change the OUTCOME — it still fails, still escalates to a
+        // boost, and still refuses to balance off evidence it does not have.
+        assertTrue("it must still escalate to a boost", control.volumeCalls.contains(Triple("t", false, 60)))
+        assertTrue("and still refuse to balance", cal.reduceLevels().isEmpty())
+    }
+
     // ---- end-of-run volume balance --------------------------------------------------
 
     @Test

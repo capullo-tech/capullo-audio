@@ -566,7 +566,32 @@ class SyncCalibrator(
         // lands around 4 usable plus the verify capture, which reaches the 5-6 the estimator needs.
         // Sync-only rounds are unaffected and keep paying 3.
         val probeRepeats = if (harvest) PROBE_REPEATS * 2 else PROBE_REPEATS
-        repeat(probeRepeats) { attempt ->
+        // ABANDON A HARVEST ROUND'S EXTRA CAPTURES ONCE IT IS CLEARLY NOT WORKING.
+        //
+        // The doubling above is bought for the LEVELS, and a round that cannot attribute harvests no
+        // levels at all — so on a failing round those extra three captures buy literally nothing and
+        // cost 36 s. That is not hypothetical: both failed unboosted attempts of 2026-08-18 spent
+        // all six probes and produced zero samples and zero level candidates before failing, and a
+        // boosted run pays this on its FIRST round by construction (the unboosted attempt failing is
+        // what triggers the boost).
+        //
+        // The bar is deliberately weak — nothing at all after [PROBE_REPEATS] captures, neither a
+        // blind sample nor a rescue candidate. A round that is merely struggling (one sample, or
+        // rescue candidates that have not yet reached quorum) still gets its full budget, because
+        // those are exactly the marginal rounds the extra captures exist to rescue. Only a round
+        // with no evidence whatsoever stops early, and it would have to invent all of it in the
+        // remaining captures to change its own outcome.
+        for (attempt in 0 until probeRepeats) {
+            if (harvest && attempt >= PROBE_REPEATS && samples.isEmpty() && rescues.isEmpty()) {
+                Log.i(
+                    TAG,
+                    "${target.name}: abandoning the harvest round's remaining " +
+                        "${probeRepeats - attempt} capture(s) — $attempt probes produced no " +
+                        "attribution and no rescue candidate, and the extra captures exist only " +
+                        "to feed levels this round can no longer harvest",
+                )
+                break
+            }
             val probed = measurer.measure(PAIR_PEAKS, sources = 2)
             val probedLevel = measurer.levelReader()
             val probedTiming = measurer.timingReader()
@@ -1082,7 +1107,33 @@ class SyncCalibrator(
             // level estimator is noisy per capture (8-13 dB between consecutive captures of one
             // speaker at a fixed gain, rig 2026-08-11), so MIN_LEVEL_SAMPLES needs the yield.
             val cands = mutableListOf<LevelCand>()
-            repeat(PROBE_REPEATS * 2) { attempt ->
+            // STOP ONCE THERE IS ENOUGH, rather than always paying the worst case.
+            //
+            // The 6 is a YIELD calculation, not a requirement: it assumes ~65 % of probes attribute
+            // (rig 2026-08-11: 3, 1 and 4 usable from 4 probes) and buys 6 to land the 5-6 the level
+            // estimator needs. But the two healthy runs of 2026-08-14 yielded 6 of 6, so a good room
+            // pays two extra captures — 24 s — for samples it already has.
+            //
+            // Safe HERE and not in the sync round, and the difference is worth stating: a sync
+            // round's probes feed BOTH the consensus delta and the levels, so cutting them short
+            // weakens the correction that gets written. This round re-derives no delta at all — its
+            // spacing was fixed before the first capture — so a capture only ever banks one more
+            // level sample. Stopping at [LEVEL_HARVEST_ENOUGH] therefore trades precision the
+            // estimator has already declared sufficient, not correctness.
+            //
+            // Deliberately ABOVE [MIN_LEVEL_SAMPLES]: the agreement gate can still discard a capture
+            // as an outlier, and stopping at exactly 3 would leave a round one bad capture short of
+            // its own floor with no way back.
+            for (attempt in 0 until PROBE_REPEATS * 2) {
+                if (cands.size >= LEVEL_HARVEST_ENOUGH) {
+                    Log.i(
+                        TAG,
+                        "balance: levels-only round stopping at ${cands.size} usable capture(s) " +
+                            "after ${attempt} probe(s) — enough for the estimator, so the " +
+                            "remaining ${PROBE_REPEATS * 2 - attempt} are not worth the time",
+                    )
+                    break
+                }
                 val probed = measurer.measure(PAIR_PEAKS, sources = 2)
                 val read = measurer.levelReader()
                 val peak = measurer.timingReader()
@@ -2147,6 +2198,16 @@ class SyncCalibrator(
          *  The cost is runs that decline to balance, which is the right way to be wrong here: the
          *  levels are still logged, and the next run decides. */
         internal const val MIN_LEVEL_SAMPLES = 3
+
+        /** Usable captures at which the LEVELS-ONLY round stops early, saving ~24 s on a healthy
+         *  room. One above [MIN_LEVEL_SAMPLES] on purpose: the agreement gate can still throw a
+         *  capture out as an outlier, and stopping at exactly the floor would leave a round one bad
+         *  capture short of it with the probes already restored and no way to take another.
+         *
+         *  Only the levels-only round may do this. A sync round's probes feed the consensus delta as
+         *  well as the levels, so stopping it early would degrade the correction it writes; this
+         *  round re-derives nothing and each capture only banks one more level sample. */
+        private const val LEVEL_HARVEST_ENOUGH = 4
 
         /** How far apart two captures' level readings for one client may sit and still count as the
          *  same measurement, in dB of centred log level.
