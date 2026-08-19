@@ -20,8 +20,8 @@ import kotlinx.coroutines.launch
  * anyone decided against it, but because the button is the last one percent of a much larger job.
  * A host that has to be reproduced per app is a host that will not be.
  *
- * The app keeps exactly what is genuinely app-shaped: where its journal files live, how it publishes
- * metadata, and which clients its server currently reports. Everything else — building the
+ * The app keeps what is genuinely app-shaped: where its journal files live, how it publishes
+ * metadata, and which clients its server reports. Everything else — building the
  * calibrator, ordering the client list so this device is the reference, suppressing audio-focus
  * losses for the duration, mirroring state to the UI, logging the program material, undo, and
  * crash recovery — is identical everywhere and lives here.
@@ -41,6 +41,17 @@ class CalibrationHost(
     private val control: () -> CalibrationControl?,
     /** The connected clients as the server currently reports them, in any order. */
     private val connectedClients: () -> List<SyncCalibrator.CalClient>,
+    /**
+     * Every client's latency the server knows about, INCLUDING disconnected ones.
+     *
+     * Deliberately not derived from [connectedClients]. This feeds the run's read-back, which
+     * confirms each latency write actually landed, and the ids it checks are whatever the run
+     * wrote to. A client that drops mid-run is still in that set, so filtering to connected
+     * clients would make its entry read as null, and a normal disconnect would be reported as
+     * "read-back FAILED" — a fault where there was none. Snapcast keeps disconnected clients in
+     * its status with their last known values, which is exactly what is wanted here.
+     */
+    private val clientLatencies: () -> Map<String, Int>,
     /** This device's own snapclient id. The reference speaker is always this device, because its
      *  sink is the one co-located with the microphone. */
     private val localClientId: () -> String,
@@ -56,7 +67,7 @@ class CalibrationHost(
     private val suppressAudioFocusLosses: (Boolean) -> Unit = {},
     /** A one-line description of what is playing, polled during a run. The correlation is a matched
      *  filter against the broadcast PCM, so program material is a real variable: sustained or tonal
-     *  music self-correlates and throws ghosts at fixed lags. Without this, run-to-run spread cannot
+     *  music self-correlates and throws ghosts at fixed lags. Without it, run-to-run spread cannot
      *  be separated into "the room" versus "the song that happened to be playing". */
     private val nowPlaying: (() -> String)? = null,
     /** Asks the server for fresh status once a run has written its latencies, so the UI stops
@@ -83,6 +94,24 @@ class CalibrationHost(
 
     /** True while a run is in progress; a second [start] is ignored rather than queued. */
     val isRunning: Boolean get() = job?.isActive == true
+
+    /**
+     * Publish a refusal the HOST decided on, so app-level guards share one state flow with the
+     * run itself.
+     *
+     * Some reasons a calibration cannot start are the app's knowledge, not this class's: whether
+     * RECORD_AUDIO was granted, and whether this device is in a role that can produce reference
+     * PCM at all. Without this they would have to publish through a second channel, and the UI
+     * would show "idle" while the app believed it had reported a failure.
+     *
+     * Refusals are logged as well as published, because they fire BEFORE any calibrator exists —
+     * a silent return produces a run with no log output whatsoever, indistinguishable from a lost
+     * intent, and that has cost real debugging time on the rig.
+     */
+    fun refuse(reason: String) {
+        Log.w(TAG, "calibrate refused: $reason")
+        _state.value = SyncCalibrator.State.Failed(reason)
+    }
 
     /**
      * Start a calibration in [scope], or publish a [SyncCalibrator.State.Failed] naming the reason
@@ -116,11 +145,23 @@ class CalibrationHost(
         val calibrator = SyncCalibrator(
             tapArm = { ring ->
                 disarm?.invoke()
-                disarm = if (ring != null) reference.arm(ring) else null
+                disarm = if (ring != null) {
+                    // A null here means the app cannot produce reference PCM after all. Say so
+                    // rather than letting the run continue against a ring nothing feeds, which
+                    // surfaces minutes later as "baseline measurement failed" and sends the reader
+                    // looking at the microphone instead of at the missing reference.
+                    reference.arm(ring)
+                        ?: run {
+                            Log.w(TAG, "no reference source armed — the run will find silence")
+                            null
+                        }
+                } else {
+                    null
+                }
             },
             mic = MicCapture(context),
             control = ctl,
-            readLatencies = { connectedClients().associate { it.id to it.latencyMs } },
+            readLatencies = { clientLatencies() },
             journal = journal,
             history = history,
             volumeUndo = volumeUndo,
@@ -167,7 +208,7 @@ class CalibrationHost(
         val ctl = control() ?: return emptyList()
         val previous = volumeUndo?.load() ?: return emptyList()
         Log.i(TAG, "undoing balance for ${previous.size} client(s): $previous")
-        previous.forEach { (id, percent) -> ctl.sendSetVolume(id, muted = false, percent = percent) }
+        previous.forEach { (id, pct) -> ctl.sendSetVolume(id, muted = false, percent = pct) }
         volumeUndo.clear()
         return previous.keys.toList()
     }
