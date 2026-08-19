@@ -72,9 +72,10 @@ fun SnapcastControlSheet(
     // clears its persisted spatial role); long press resets EVERY connected client.
     onResetSelf: () -> Unit = {},
     onResetAll: () -> Unit = {},
-    // Broadcaster-only mic sync calibration (null hides the button). Runs on the server
-    // device: records the room, cross-correlates against the broadcast PCM, trims each
-    // client's latency automatically.
+    // Mic sync calibration (null hides the button). Records the room, cross-correlates against the
+    // PCM being played, and trims each client's latency automatically. NOT broadcaster-only: a
+    // client can run it too, and measuring from where someone actually listens is the point of
+    // doing so. Pass null when this device cannot obtain reference PCM.
     onCalibrateSync: (() -> Unit)? = null,
     calibrationRunning: Boolean = false,
     calibrationStatus: String = "",
@@ -131,22 +132,35 @@ fun SnapcastControlSheet(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (isBroadcaster) {
+            // RESET is broadcaster-only; CALIBRATION is not. They used to share this block, which
+            // is what hid the mic button from clients — an accident of layout, not a decision.
+            //
+            // A client can calibrate as soon as it can obtain reference PCM (it starts a silent
+            // second snapclient for that), and it is usually the BETTER place to run from: the
+            // calibration balances the room at the microphone, so measuring from a device sitting
+            // where someone listens beats measuring from wherever the server phone was left.
+            //
+            // Visibility is therefore the caller's answer to "can this device calibrate?", passed
+            // as a non-null [onCalibrateSync], and no longer tied to being the broadcaster.
+            if (isBroadcaster || onCalibrateSync != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Short press = reset this device; long press = reset all clients. An IconButton
-                    // can't distinguish long-press, so use a combinedClickable Box sized like one.
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .combinedClickable(onClick = onResetSelf, onLongClick = onResetAll),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.SettingsBackupRestore,
-                            contentDescription = "Reset this device (long-press: reset all)",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    if (isBroadcaster) {
+                        // Short press = reset this device; long press = reset all clients. An
+                        // IconButton can't distinguish long-press, so use a combinedClickable Box
+                        // sized like one.
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .combinedClickable(onClick = onResetSelf, onLongClick = onResetAll),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SettingsBackupRestore,
+                                contentDescription = "Reset this device (long-press: reset all)",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                     onCalibrateSync?.let { start ->
                         IconButton(
