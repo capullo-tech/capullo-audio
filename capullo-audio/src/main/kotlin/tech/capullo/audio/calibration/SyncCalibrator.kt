@@ -195,6 +195,14 @@ class SyncCalibrator(
         // no levels by design. The user would see sync work and the balance quietly do nothing,
         // which is the exact failure the boost-gap work exists to prevent.
         //
+        // WHICH RUN THIS ACTUALLY PROTECTS, measured on the rig 2026-08-19: NOT the first one. A
+        // host reads its client list before calling in, and the tap only connects once [tapArm]
+        // starts it from inside this function, so a first run never sees a phantom and this filter
+        // removes nothing. It protects the run AFTER a tap outlived its run — a cancelled job, or a
+        // process death between arming and the finally that stops it. That window is small and the
+        // tap is partly self-limiting (it dies when its FIFO reader goes away), but "small window,
+        // silent failure, one line to close" is exactly the trade this codebase keeps taking.
+        //
         // Filtered here rather than at the call site so no host can forget: the calibrator owns the
         // rule that a silent instrument is not a speaker.
         val allClients = connectedClients.filterNot { isReferenceTap(it) }
