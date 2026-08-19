@@ -1189,6 +1189,59 @@ class OrchestrationTest {
         assertTrue("and still refuse to balance", cal.reduceLevels().isEmpty())
     }
 
+    @Test
+    fun `a reference tap client is excluded and does not disable the balance`() = runTest {
+        // THE RIG-CONFIRMED HAZARD (2026-08-19). A client-side run obtains its reference PCM from a
+        // SECOND snapclient started with `--player file:`, because one snapclient can play or
+        // expose PCM but never both. That tap is a real connected client to the server: unnamed,
+        // 100 % volume, and completely silent.
+        //
+        // The damage it does is not noise, it is SILENCE OF THE FEATURE. Two speakers plus a tap is
+        // three clients, which routes the run to the batch path, where levelProbeSet(3) declines
+        // the 940 ms excursion and the round harvests no levels at all. Sync would appear to work
+        // while the balance quietly stopped happening — the exact shape of the boost-gap bug.
+        //
+        // So this asserts the OUTCOME, not just the filtering: with a tap present the run must
+        // still take the two-client pair path and still produce a balance.
+        val control = FakeControl(mapOf("ref" to 0, "t" to 0, "qctap-001" to 0))
+        val measurer = SceneMeasurer(
+            control,
+            intrinsic = mapOf("ref" to 1000.0, "t" to 1200.0),
+            z = mapOf("ref" to 40.0, "t" to 20.0),
+            level = mapOf("ref" to 1.0, "t" to 0.5),
+        )
+        val cal = SyncCalibrator(
+            tapArm = {}, control = control,
+            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+        )
+        val ok = cal.calibrate(
+            listOf(
+                SyncCalibrator.CalClient("ref", "ref", 0, 100, false),
+                SyncCalibrator.CalClient("t", "t", 0, 100, false),
+                // The tap, exactly as the rig showed it: no name, full volume, silent.
+                SyncCalibrator.CalClient("qctap-001", "", 0, 100, false),
+            ),
+        )
+        assertTrue("the run should succeed, state=${cal.state.value}", ok)
+        // The balance still resolves, at the ratio the scene commanded. If the tap had been
+        // counted, the batch path would have harvested nothing and this would be empty.
+        val levels = cal.reduceLevels()
+        assertEquals("only the two real speakers are measured, got ${levels.keys}", 2, levels.size)
+        assertEquals(
+            "the commanded ratio survives",
+            0.5,
+            levels.getValue("t") / levels.getValue("ref"),
+            1e-9,
+        )
+        // And nothing may be written to the tap: it has no speaker, so any volume or latency
+        // written to it is a write into the void that also confuses the server's client list.
+        assertTrue(
+            "the tap must never be written to, got ${control.volumeCalls}",
+            control.volumeCalls.none { it.first == "qctap-001" },
+        )
+        assertEquals("the tap's latency is untouched", 0, control.latency["qctap-001"])
+    }
+
     // ---- end-of-run volume balance --------------------------------------------------
 
     @Test

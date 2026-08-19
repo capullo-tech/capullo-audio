@@ -180,7 +180,26 @@ class SyncCalibrator(
      * entry = reference whose latency is never changed). Returns true if every target
      * ended calibrated (or already aligned).
      */
-    suspend fun calibrate(allClients: List<CalClient>): Boolean {
+    suspend fun calibrate(connectedClients: List<CalClient>): Boolean {
+        // DROP THE REFERENCE TAP BEFORE ANYTHING ELSE LOOKS AT THE LIST.
+        //
+        // A client-side calibration run gets its reference PCM by starting a SECOND snapclient with
+        // `--player file:`, because one snapclient can either play or expose its PCM, never both
+        // (rig-verified 2026-08-19). That tap is a genuine connected client from the server's point
+        // of view: it appears in the client list at 100 % volume with no name, and it emits no
+        // sound at all.
+        //
+        // Left in, it is not merely noise — it silently disables the balance. Two real speakers
+        // plus the tap is THREE clients, which routes the run to the batch path, where
+        // [levelProbeSet] declines the 940 ms excursion three speakers need and the round harvests
+        // no levels by design. The user would see sync work and the balance quietly do nothing,
+        // which is the exact failure the boost-gap work exists to prevent.
+        //
+        // Filtered here rather than at the call site so no host can forget: the calibrator owns the
+        // rule that a silent instrument is not a speaker.
+        val allClients = connectedClients.filterNot { isReferenceTap(it) }
+        val taps = connectedClients.size - allClients.size
+        if (taps > 0) Log.i(TAG, "ignoring $taps reference tap client(s) — they emit no sound")
         if (allClients.size < 2) {
             _state.value = State.Failed("need at least 2 connected clients, got ${allClients.size}")
             return false
@@ -1553,6 +1572,12 @@ class SyncCalibrator(
 
     private fun isWebClient(client: CalClient) = client.id.startsWith(WEB_CLIENT_PREFIX)
 
+    /** True for the silent second snapclient a client-side run uses to obtain reference PCM.
+     *  Identified by an id prefix the host controls, the same mechanism [isWebClient] uses, because
+     *  the server offers nothing else to distinguish it: it is a real, connected, correctly
+     *  behaving client that happens to have no speaker. */
+    private fun isReferenceTap(client: CalClient) = client.id.startsWith(REFERENCE_TAP_PREFIX)
+
     // ---- shared measurement --------------------------------------------------------
 
     /** Like [measure] but also returns the peaks of each 6 s half of the same capture, for
@@ -2072,6 +2097,14 @@ class SyncCalibrator(
         }
 
         private const val WEB_CLIENT_PREFIX = "qcweb-"
+
+        /** Id prefix the host must give the reference-tap snapclient of a client-side run, so the
+         *  calibrator can tell a silent instrument from a speaker. Rig-verified 2026-08-19: a
+         *  second snapclient started with `--player file:` coexists with the audible one, delivers
+         *  real-time PCM (193,920 B/s against the 192,000 B/s that 48 kHz/16-bit/stereo demands),
+         *  and shows up as an unnamed 100 % client on the server. Anything the host starts with
+         *  this prefix is excluded from calibration entirely. */
+        const val REFERENCE_TAP_PREFIX = "qctap-"
 
 
         /** Floor the no-mute batch lifts a too-quiet client to before measuring. A FLOOR, not the
