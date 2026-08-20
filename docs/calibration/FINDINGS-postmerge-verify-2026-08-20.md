@@ -2,7 +2,9 @@
 
 Build: quantumcast vc7 (`fbd1b93`) against capullo-audio `e83ff2c`, both on main.
 Run from the OPPO CLIENT (reversed rig). Criteria for each run were written BEFORE it:
-`CRITERIA-postmerge-verify-20260820.md`. Logs: `postmerge-run1/2/3-20260820.log`.
+`CRITERIA-postmerge-verify-20260820.md`. The raw logcat for the three runs
+(`postmerge-run1/2/3-20260820.log`) is kept on the build box, not in this repo; every figure quoted
+below is copied verbatim from it.
 
 ## Result: both halves work. Sync verified against a known answer; balance verified end to end.
 
