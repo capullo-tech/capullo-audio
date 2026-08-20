@@ -14,6 +14,30 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
 /**
+ * Resolves the colour scheme every capullo app was selecting for itself: dynamic colour on API 31+,
+ * a light/dark palette pair below it.
+ *
+ * Exposed separately from [CapulloTheme] because an app may need the scheme as a VALUE rather than
+ * a wrapper — telecloud-radio tints the resolved scheme with the cover art of whatever is playing
+ * before handing it to `MaterialTheme`. The branch logic is the shared part; what an app does with
+ * the result is not.
+ */
+@Composable
+fun capulloColorScheme(
+    darkTheme: Boolean,
+    lightColors: ColorScheme,
+    darkColors: ColorScheme,
+    dynamicColor: Boolean = true,
+): ColorScheme = when {
+    dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+        val context = LocalContext.current
+        if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    }
+    darkTheme -> darkColors
+    else -> lightColors
+}
+
+/**
  * The Material3 wrapper every capullo app was writing for itself: dynamic colour on API 31+,
  * a light/dark palette pair below it, and an optional status-bar appearance effect.
  *
@@ -39,14 +63,7 @@ fun CapulloTheme(
     applyStatusBarAppearance: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> darkColors
-        else -> lightColors
-    }
+    val colorScheme = capulloColorScheme(darkTheme, lightColors, darkColors, dynamicColor)
 
     if (applyStatusBarAppearance) {
         val view = LocalView.current
