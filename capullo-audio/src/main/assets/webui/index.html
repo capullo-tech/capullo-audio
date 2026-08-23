@@ -625,7 +625,9 @@ class SnapAudio {
 
   _connect() {
     if (!this.running) return;
-    const url = 'ws://' + location.host + '/stream';
+    // wss on https pages: browsers block ws:// from an https origin (mixed content) -
+    // matters when the player is reached through a TLS-terminating tunnel (public link).
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/stream';
     dbg('WS connect → ' + url, 'i');
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
@@ -1034,7 +1036,8 @@ function connect() {
   // onclose timer and the visibility handler.
   if (S.ws && (S.ws.readyState === 0 || S.ws.readyState === 1)) return;
   setStatus('ing');
-  const ws = new WebSocket('ws://' + location.host + '/jsonrpc');
+  // wss on https pages (mixed-content block), same as the /stream socket above.
+  const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/jsonrpc');
   S.ws = ws;
   ws.onopen  = () => { setStatus('conn'); rpc('Server.GetStatus', {}); flushPendingControl(); };
   ws.onclose = () => { setStatus('err'); setTimeout(connect, 3000); };
