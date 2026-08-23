@@ -72,6 +72,8 @@ fun SnapcastControlSheet(
     onResetSelf: () -> Unit = {},
     onResetAll: () -> Unit = {},
     httpPort: Int = 1680,
+    // Broadcaster's public (tunnel) link; when not Off the QR dialog gains a "Public link" segment.
+    publicLink: PublicLinkState = PublicLinkState.Off,
     onDismiss: () -> Unit,
 ) {
     val connectedClients = remember(groups) {
@@ -88,7 +90,7 @@ fun SnapcastControlSheet(
     var showQr by remember { mutableStateOf(false) }
     if (showQr) {
         val ips = remember { usefulLocalIps() }
-        ListenQrDialog(ips = ips, httpPort = httpPort, onDismiss = { showQr = false })
+        ListenQrDialog(ips = ips, httpPort = httpPort, publicLink = publicLink, onDismiss = { showQr = false })
     }
 
     ModalBottomSheet(
