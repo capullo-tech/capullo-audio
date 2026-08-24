@@ -11,7 +11,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 // The two web-player switches, shared by every capullo app's Settings screen. Both configure the
@@ -21,10 +20,10 @@ import androidx.compose.ui.unit.dp
 // a generic row would leave them copy-pasted into each app and converge nothing. Apps keep their
 // own "Web player" section header.
 //
-// See [BalanceControls] for why the vertical rhythm is baked in and only [horizontalPadding] is
-// exposed. Applying it inside matters more here than there: the row's `clickable` sits ABOVE the
-// padding, so a ripple covers the whole padded row and the full row is tappable. Padding routed
-// through [modifier] would land outside the clickable and shrink the touch target.
+// See [BalanceControls] for why the padding is baked in rather than passed. Applying it inside
+// matters more here than there: the row's `clickable` sits ABOVE the padding, so a ripple covers
+// the whole padded row and the full row is tappable. Padding routed through [modifier] would land
+// outside the clickable and shrink the touch target.
 @Composable
 fun WebPlayerToggles(
     autostart: Boolean,
@@ -32,7 +31,6 @@ fun WebPlayerToggles(
     debugPanel: Boolean,
     onDebugPanelChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
-    horizontalPadding: Dp = 0.dp,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
         ToggleRow(
@@ -42,7 +40,6 @@ fun WebPlayerToggles(
                 "first time. Applies on the web page's next reload.",
             checked = autostart,
             onToggle = onAutostartChange,
-            horizontalPadding = horizontalPadding,
         )
         ToggleRow(
             label = "Debug panel",
@@ -50,7 +47,6 @@ fun WebPlayerToggles(
                 "the web page's next reload.",
             checked = debugPanel,
             onToggle = onDebugPanelChange,
-            horizontalPadding = horizontalPadding,
         )
     }
 }
@@ -61,13 +57,12 @@ private fun ToggleRow(
     description: String,
     checked: Boolean,
     onToggle: (Boolean) -> Unit,
-    horizontalPadding: Dp,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onToggle(!checked) }
-            .padding(horizontal = horizontalPadding, vertical = 8.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
