@@ -1080,11 +1080,21 @@ function onNotif(m) {
   }
 }
 
+// A client-side mic calibration runs a second, SILENT snapclient to get its reference PCM. For the
+// length of that run it is a genuinely connected client that plays to nobody, and it would show up
+// here as a phantom card and inflate every listener count. The Android apps drop it where their
+// status arrives (withoutReferenceTaps); this is the same rule for the web player, which talks to
+// snapserver over its own socket and never sees those models.
+const TAP_PREFIX = 'qctap-';
+
 function applyServer(srv) {
   S.clients = {};
   for (const g of (srv.groups || [])) {
     if (!S.sid && g.stream_id) S.sid = g.stream_id;
-    for (const c of (g.clients || [])) S.clients[c.id] = c;
+    for (const c of (g.clients || [])) {
+      if (c.id && c.id.startsWith(TAP_PREFIX)) continue;
+      S.clients[c.id] = c;
+    }
   }
   // Broadcaster name: the local snapclient on the server's own host carries the
   // custom name (e.g. "Living Room [S]"); fall back to the snapserver host name.

@@ -1,6 +1,7 @@
 package tech.capullo.audio.snapcast
 
 import android.content.Context
+import android.provider.Settings
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -44,8 +45,32 @@ import java.util.UUID
  *
  * A FIFO is used rather than a regular file because this stream never ends on its own: the rig test
  * wrote 19 MB to disk in 100 s. A pipe keeps the data in memory and back-pressures naturally.
+ *
+ * **The tap must be deregistered, not just killed.** Snapserver deliberately KEEPS disconnected
+ * clients in its status with their last-known values — the calibration's own read-back depends on
+ * that — so killing the process leaves the tap in the server's client list and in `server.json`
+ * for ever. With a random id per run that is one permanent orphan per calibration: the rig had
+ * accumulated 14 of them across 15 groups by 2026-08-25, each alone in its own group, inflating
+ * `Server.GetStatus` from 2.9 KB to 9.4 KB. Two things stop that, and both are needed:
+ *
+ * - [deregister] issues `Server.DeleteClient` for the id once the process is gone, which is what
+ *   that RPC exists for. It was implemented and never called.
+ * - The id is now STABLE per device rather than a fresh UUID, so a run that dies before it can
+ *   deregister is reused by the next run instead of adding another entry. At worst one orphan per
+ *   device, never one per run.
  */
-class ReferenceTapProcess(private val context: Context) {
+class ReferenceTapProcess(
+    private val context: Context,
+    /**
+     * Removes the tap from the server's client list, given the id it registered with. Called after
+     * the process is killed. Optional only so a caller with no control connection still gets a
+     * working tap; omitting it reintroduces the orphan the stable id then bounds to one.
+     *
+     * Implementations should let the server notice the disconnect before deleting, and must not
+     * block: [stop] is called from a plain (non-suspending) disarm lambda.
+     */
+    private val deregister: ((String) -> Unit)? = null,
+) {
 
     private var process: Process? = null
     private var fifo: File? = null
@@ -70,8 +95,7 @@ class ReferenceTapProcess(private val context: Context) {
         snapserverPort: Int,
         ring: ReferencePcmRing,
     ) = withContext(Dispatchers.IO) {
-        val id = tech.capullo.audio.calibration.SyncCalibrator.REFERENCE_TAP_PREFIX +
-            UUID.randomUUID().toString().take(8)
+        val id = stableTapId()
         // A fresh FIFO per run. mkfifo can fail if a previous run died without cleaning up, so the
         // stale node is removed first rather than trusted.
         val path = File(context.cacheDir, "calref.pcm").also { it.delete() }
@@ -114,13 +138,52 @@ class ReferenceTapProcess(private val context: Context) {
         }
     }
 
-    /** Kill the tap and remove its FIFO. Safe to call twice, and safe to call when never started. */
+    /**
+     * Kill the tap, deregister it from the server, and remove its FIFO. Safe to call twice, and
+     * safe to call when never started.
+     *
+     * The id is captured before it is cleared, so [deregister] still receives it.
+     */
+    @Synchronized
     fun stop() {
+        // Claim the id atomically. stop() is reached twice by design on a normal run — the disarm
+        // lambda calls it, and the cancelled coroutine's own finally calls it again — and without
+        // this both callers read the same non-null id and fire two Server.DeleteClient calls, the
+        // second answering "Client not found". Harmless, but it reads as a failure in the log.
+        val id = hostId
+        hostId = null
         process?.destroyForcibly()
         process = null
-        hostId = null
         fifo?.delete()
         fifo = null
+        if (id != null) deregister?.invoke(id)
+    }
+
+    /**
+     * The id this device's tap always registers with. Stable so a crashed run leaves at most one
+     * orphan rather than one per run, and distinct per device so two calibrating clients cannot
+     * collide on the server.
+     *
+     * `ANDROID_ID` is per-device, per-app and needs no permission. It can be null on a badly
+     * behaved image, hence the fallback to a UUID persisted next to the FIFO — that file survives
+     * anything short of clearing app data, which is a fresh start anyway.
+     */
+    private fun stableTapId(): String {
+        val android = try {
+            Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        } catch (e: Exception) {
+            Log.w(TAG, "ANDROID_ID unavailable: ${e.message}"); null
+        }
+        val suffix = android?.takeIf { it.isNotBlank() }?.take(8) ?: persistedTapSuffix()
+        return tech.capullo.audio.calibration.SyncCalibrator.REFERENCE_TAP_PREFIX + suffix
+    }
+
+    private fun persistedTapSuffix(): String {
+        val f = File(context.filesDir, "calref-tap-id")
+        return runCatching { f.readText().trim().takeIf { it.isNotEmpty() } }.getOrNull()
+            ?: UUID.randomUUID().toString().take(8).also {
+                runCatching { f.writeText(it) }
+            }
     }
 
     /** Creates a named pipe, returning false if the platform refuses. Uses the shell's mkfifo:
