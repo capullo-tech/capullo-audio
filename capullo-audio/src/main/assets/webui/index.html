@@ -32,6 +32,15 @@ header{
 }
 .hbtn:active{background:#39415E}
 .hbtn.live{background:#1DB954;color:#000}
+/* Connected but not audible - blocked, paused or still connecting. The plug must NOT
+   look like it is playing. Only .blocked pulses: that is the one asking for a tap. */
+.hbtn.armed{background:#232838;color:#E8C46A;box-shadow:inset 0 0 0 2px #E8C46A}
+.hbtn.blocked::after{
+  content:'';position:absolute;inset:-3px;border-radius:50%;
+  border:2px solid #E8C46A;animation:armpulse 1.9s ease-out infinite;pointer-events:none;
+}
+@keyframes armpulse{0%{transform:scale(1);opacity:.55}70%,100%{transform:scale(1.35);opacity:0}}
+@media (prefers-reduced-motion:reduce){.hbtn.blocked::after{animation:none;opacity:.35}}
 .hbtn svg{width:17px;height:17px;fill:currentColor;pointer-events:none}
 #cc-num{
   font-size:9px;font-weight:900;fill:currentColor;
@@ -439,11 +448,11 @@ const CLIENT_ID = QC.id;
 (function () {
   fetch('webcfg.json', { cache: 'no-store' })
     .then(r => r.json())
+    .catch(() => null)          // missing/unreadable file → web defaults, not an error
     .then(c => {
       if (c && c.debug === true) { const d = $('dbg'); if (d) d.style.display = 'block'; }
       if (c && c.autoplay === true) armAutoplay();
-    })
-    .catch(() => {});
+    });
 })();
 (function () {
   fetch(location.pathname + '?_=' + Date.now(), { cache: 'no-store' })
@@ -677,6 +686,7 @@ class SnapAudio {
     ws.onopen = () => {
       clearTimeout(this._connectTimer);
       dbg('WS open', 'ok');
+      updateAudioBtn();
       if (this.ctx.state === 'suspended') this.ctx.resume();
       this.playing = false; this.chunks = []; this._chunk = null;
       this._pendingTime.clear();
@@ -691,7 +701,7 @@ class SnapAudio {
       clearTimeout(this._connectTimer);
       clearInterval(this.syncHandle); this.syncHandle = null;
       this.playing = false;
-      updateAudioBtn(false);
+      updateAudioBtn();
       if (this.running) { dbg('reconnecting in 1s…', 'i'); setTimeout(() => this._connect(), 1000); }
     };
     // onerror gives no detail by spec; the following onclose carries the code.
@@ -755,7 +765,7 @@ class SnapAudio {
     switch (type) {
       case 1: this._onCodec(dv); break;
       case 2: this._onChunk(data, dv); break;
-      case 3: this._onSettings(dv); updateAudioBtn(true); break;
+      case 3: this._onSettings(dv); updateAudioBtn(); break;
       case 4: this._onTime(id, dv); break;
       default: dbg('unknown msg type='+type+' len='+data.byteLength,'i');
     }
@@ -792,7 +802,7 @@ class SnapAudio {
         dbg('CODEC '+codec+' hdrLen='+hdrLen+' (only pcm supported)','e');
       }
     } catch(e) { dbg('CODEC parse error: '+e,'e'); }
-    updateAudioBtn(true);
+    updateAudioBtn();
   }
 
   _onSettings(dv) {
@@ -945,10 +955,44 @@ class SnapAudio {
 
 let snapAudio = null, silenceEl = null;
 
-function updateAudioBtn(live) {
+// Audio is truly flowing only when the context runs, (on iOS) the element is playing,
+// AND chunks can still arrive. A running context over a dead socket is silent, so it
+// must not read as live: the plug would be green with nothing coming out, and a tap
+// would stop the player instead of reconnecting it.
+function flowing() {
+  return !!(snapAudio && snapAudio.ctx && snapAudio.ctx.state === 'running' &&
+            (!snapAudio.mediaEl || !snapAudio.mediaEl.paused) &&
+            !snapAudio._socketIsDead());
+}
+
+// "Not audible" has three different causes and they must not look alike:
+//   blocked    - the browser is holding the audio until a user gesture. Only this one
+//                pulses, because only this one is asking for a tap.
+//   paused     - the user paused from the lockscreen. Asking them to tap would be wrong.
+//   connecting - context is running, chunks are not arriving yet. Pulsing here would
+//                re-create the double-press the optimistic green was added to prevent.
+// S.localPaused is the discriminator, not ctx.state: localPause() suspends the context
+// on desktop, so a deliberate pause is indistinguishable from an autoplay block without it.
+function audioBtnState() {
+  if (!snapAudio) return 'off';
+  if (flowing()) return 'live';
+  if (S.localPaused) return 'paused';
+  if (snapAudio.ctx && snapAudio.ctx.state === 'suspended') return 'blocked';
+  return 'connecting';
+}
+
+// Takes no arguments on purpose - every caller gets the same computed truth.
+function updateAudioBtn() {
   const b = $('audio-btn');
-  b.classList.toggle('live', live);
-  b.title = live ? 'Stop listening' : 'Listen on this device';
+  const st = audioBtnState();
+  b.classList.toggle('live', st === 'live');
+  b.classList.toggle('armed', st === 'blocked' || st === 'paused' || st === 'connecting');
+  b.classList.toggle('blocked', st === 'blocked');
+  b.title = st === 'live'       ? 'Stop listening'
+          : st === 'blocked'    ? 'Tap to start listening on this device'
+          : st === 'paused'     ? 'Stop listening'
+          : st === 'connecting' ? 'Connecting… (tap to cancel)'
+          :                       'Listen on this device';
 }
 
 // 1s of silence as a WAV blob - snapweb ships 10-seconds-of-silence.mp3 and
@@ -997,12 +1041,13 @@ function startLocalAudio() {
   if (snapAudio.mediaEl) {
     Promise.resolve(snapAudio.mediaEl.play()).catch(e => dbg('mediaEl play failed: ' + e, 'e'));
   }
-  // Optimistic: light the plug immediately. Without this the button only turned
-  // green once the server's SETTINGS msg arrived (several round-trips later), so
-  // during the connect window it looked dead - a second press (snapAudio already
-  // exists) tore it down, causing the "press many times" behaviour. The real
-  // SETTINGS handler re-affirms this, and a failed connect flips it back off.
-  updateAudioBtn(true);
+  // The plug goes 'armed' here, not 'live'. Without any feedback the button looked
+  // dead during the connect window and a second press tore it down ("press many
+  // times"); 'armed' fixes that without claiming audio is playing. It turns green
+  // only once flowing() is true - context running and the stream socket alive.
+  ctx.onstatechange = () => updateAudioBtn();
+  if (snapAudio.mediaEl) snapAudio.mediaEl.onplay = snapAudio.mediaEl.onpause = () => updateAudioBtn();
+  updateAudioBtn();
   Promise.resolve(silenceEl.play()).catch(e => dbg('silence play failed: '+e, 'e'))
     .then(() => { if (snapAudio) snapAudio.start(); });
 }
@@ -1012,11 +1057,34 @@ function stopLocalAudio() {
   snapAudio.stop();
   if (snapAudio._watch) clearInterval(snapAudio._watch);
   if (snapAudio.mediaEl) { snapAudio.mediaEl.pause(); snapAudio.mediaEl.srcObject = null; snapAudio.mediaEl.remove(); }
-  snapAudio = null; updateAudioBtn(false);
+  snapAudio = null; updateAudioBtn();
   if (silenceEl) { silenceEl.pause(); silenceEl.removeAttribute('src'); silenceEl.remove(); silenceEl = null; }
   syncMediaSession();
 }
-$('audio-btn').onclick = () => { if (snapAudio) stopLocalAudio(); else startLocalAudio(); };
+// The load-time autostart attempt builds the player, but a browser only lets audio
+// start on an origin it already trusts. On a first visit the context stays suspended
+// and THIS click is the user activation that releases it - so resume, don't rebuild,
+// and never tear down a player the user is trying to start.
+function resumeLocalAudio() {
+  if (snapAudio.ctx && snapAudio.ctx.state === 'suspended') {
+    snapAudio.ctx.resume().then(updateAudioBtn).catch(() => {});
+  }
+  // Both elements were created outside a gesture, so their initial play() was refused.
+  if (snapAudio.mediaEl && snapAudio.mediaEl.paused) snapAudio.mediaEl.play().catch(() => {});
+  if (silenceEl && silenceEl.paused) silenceEl.play().catch(() => {});
+  // A socket that died in the background recovers on this same press (see _revive).
+  if (snapAudio._socketIsDead()) snapAudio._revive('resume');
+  updateAudioBtn();
+}
+$('audio-btn').onclick = () => {
+  switch (audioBtnState()) {
+    case 'off':      startLocalAudio();  break;  // not listening yet
+    case 'blocked':  resumeLocalAudio(); break;  // this click is the user activation
+    // live, paused and connecting are all "already a listener", so the plug turns it
+    // off. A dead socket does not need a manual tap: ws.onclose reconnects by itself.
+    default:         stopLocalAudio();
+  }
+};
 
 // The broadcaster has locked the stream when we have no server transport rights -
 // then the lockscreen play/pause drives LOCAL listening instead of the server.
@@ -1040,6 +1108,7 @@ function localPause() {
     if (snapAudio.ctx) snapAudio.ctx.suspend().catch(() => {});
     if (silenceEl) silenceEl.pause();
   }
+  updateAudioBtn();
   syncMediaSession();
 }
 function localResume() {
@@ -1054,31 +1123,21 @@ function localResume() {
   // If the stream socket died while paused (long background / lock), revive it so one
   // play press fully recovers instead of needing the plug toggle (stop→start).
   if (snapAudio._socketIsDead()) snapAudio._revive('resume');
+  updateAudioBtn();
   syncMediaSession();
 }
 
-// Autoplay (opt-in via the app's "Web player autostart" setting → webcfg.json).
-// Browser autoplay policy usually needs one user gesture before an AudioContext
-// can produce sound, so we attempt immediately (works on engaged/installed
-// clients) and otherwise start/resume on the very first interaction anywhere.
+// Autostart (opt-in via the app's "Web player autostart" setting → webcfg.json).
+// Connect and buffer on load, and let the audio start by itself where the browser
+// permits it. It only permits it on an origin it already trusts - one the user has
+// interacted with before, or an installed app - so on a first visit this attempt is
+// refused and the plug sits 'armed' until the user taps it. That is not a bug and
+// there is no way around it from here: a script-dispatched click carries
+// isTrusted:false and grants no user activation, so the page cannot press its own
+// button. What the attempt still buys is the head start - socket open and chunks
+// buffered - so the tap starts audio immediately instead of after a connect.
 function armAutoplay() {
-  const tryStart = () => {
-    if (!snapAudio) { startLocalAudio(); return; }
-    if (snapAudio.ctx && snapAudio.ctx.state === 'suspended') snapAudio.ctx.resume().catch(() => {});
-    // iOS blocks the initial (gesture-less) mediaEl.play(), leaving the plug green but silent.
-    // Replay it here so the first user interaction (a gesture) actually starts the audio.
-    if (snapAudio.mediaEl && snapAudio.mediaEl.paused) snapAudio.mediaEl.play().catch(() => {});
-  };
-  // Audio is truly flowing only when the context runs AND (on iOS) the element is playing.
-  const flowing = () => snapAudio && snapAudio.ctx && snapAudio.ctx.state === 'running' &&
-    (!snapAudio.mediaEl || !snapAudio.mediaEl.paused);
-  const evs = ['pointerdown', 'keydown', 'touchstart'];
-  const onGesture = () => {
-    tryStart();
-    if (flowing()) evs.forEach(ev => window.removeEventListener(ev, onGesture));
-  };
-  tryStart();
-  evs.forEach(ev => window.addEventListener(ev, onGesture, { passive: true }));
+  startLocalAudio();
 }
 
 // ── JSON-RPC WebSocket ────────────────────────────────────────────────────────
