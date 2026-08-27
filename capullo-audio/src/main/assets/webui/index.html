@@ -503,7 +503,7 @@ const SVC_DEFS=[
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const S={
-  ws:null,rid:1,sid:null,
+  ws:null,wsAt:0,rid:1,sid:null,
   pb:{status:'stopped',canPlay:false,canPause:false,canNext:false,canPrev:false},
   meta:{},clients:{},knobs:{},
   drag:{on:false,sg:0,sv:{}},
@@ -521,6 +521,8 @@ const S={
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.platform) ||
   /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+const WS_CONNECT_TIMEOUT_MS = 5000;
 
 // ── Snapcast Binary Audio ─────────────────────────────────────────────────────
 // Faithful port of snapweb's snapstream.ts (proven sync logic). Invariants:
@@ -567,6 +569,7 @@ class SnapAudio {
     this.diff = 0;
     this._diffBuf = [];
     this._pendingTime = new Map();  // id → client ms at send time
+    this._connectAt = 0;            // when the current stream socket was created
     this.chunks = [];
     this._chunk = null;
     this._free = [];
@@ -614,6 +617,7 @@ class SnapAudio {
     this.chunks = []; this._chunk = null; this._free = [];
     this._pendingTime.clear();
     clearInterval(this.syncHandle); this.syncHandle = null;
+    clearTimeout(this._connectTimer); this._connectTimer = null;
     if (this.ws) {
       this.ws.onclose = () => {};  // prevent reconnect loop
       try { this.ws.close(); } catch (_) {}
@@ -621,6 +625,33 @@ class SnapAudio {
     }
     if (this.ctx.state === 'running') this.ctx.suspend();
     dbg('stopped', 'i');
+  }
+
+  // A socket still in CONNECTING is not necessarily healthy: Android's background
+  // firewall destroys the underlying TCP socket without the browser ever firing
+  // close or error, so the WebSocket sits in CONNECTING forever (observed: 2m43s,
+  // silent the whole time). Anything older than the connect timeout counts as dead.
+  _socketIsDead() {
+    const ws = this.ws;
+    if (!ws) return true;
+    if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) return true;
+    return ws.readyState === WebSocket.CONNECTING &&
+           Date.now() - this._connectAt > WS_CONNECT_TIMEOUT_MS;
+  }
+
+  // Drop a socket we have given up on and reconnect NOW. Its handlers are cleared
+  // first so its onclose can't schedule a second, competing reconnect.
+  _revive(why) {
+    const ws = this.ws;
+    if (ws) {
+      ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+      try { ws.close(); } catch (_) {}
+    }
+    clearTimeout(this._connectTimer);
+    clearInterval(this.syncHandle); this.syncHandle = null;
+    this.playing = false;
+    dbg(why + ' → reconnecting audio', 'i');
+    this._connect();
   }
 
   _connect() {
@@ -632,7 +663,19 @@ class SnapAudio {
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
+    this._connectAt = Date.now();
+    // Safety net for the wedged-CONNECTING case above: force it closed so the
+    // normal onclose retry runs. Hidden-tab timer throttling can delay this by up
+    // to a minute - the visibility handler covers the foreground case instantly.
+    clearTimeout(this._connectTimer);
+    this._connectTimer = setTimeout(() => {
+      if (this.ws === ws && ws.readyState === WebSocket.CONNECTING) {
+        dbg('WS connect stuck > ' + WS_CONNECT_TIMEOUT_MS + 'ms → closing', 'e');
+        ws.close();
+      }
+    }, WS_CONNECT_TIMEOUT_MS);
     ws.onopen = () => {
+      clearTimeout(this._connectTimer);
       dbg('WS open', 'ok');
       if (this.ctx.state === 'suspended') this.ctx.resume();
       this.playing = false; this.chunks = []; this._chunk = null;
@@ -645,6 +688,7 @@ class SnapAudio {
     ws.onmessage = ev => { if (ev.data instanceof ArrayBuffer) this._onMsg(ev.data); };
     ws.onclose = e => {
       dbg('WS closed code=' + e.code, 'e');
+      clearTimeout(this._connectTimer);
       clearInterval(this.syncHandle); this.syncHandle = null;
       this.playing = false;
       updateAudioBtn(false);
@@ -911,8 +955,16 @@ function updateAudioBtn(live) {
 // keeps it LOOPING in an <audio> element for the whole session. On iOS this
 // forces AVAudioSession into Playback mode (main speaker, not earpiece) and
 // keeps the audio session alive; it also enables MediaSession integration.
+// The loop must be LONGER THAN 5 SECONDS. Chromium classifies a media element by
+// duration: <= 5s is MediaContentType::kOneShot (a UI blip - notification sound,
+// game effect), which makes it request AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK and post
+// no media notification. With no notification there is no foreground service, so
+// Android 16 drops the browser to LAST_ACTIVITY on background and the background
+// firewall chain destroys its TCP sockets - the stream and control WebSockets die
+// a few seconds after the screen locks. Above 5s it is kPersistent: full
+// AUDIOFOCUS_GAIN, a real media session, and the sockets survive.
 function makeSilenceUrl() {
-  const sr = 8000, n = sr;  // 1 second, mono 16-bit
+  const sr = 8000, n = sr * 30;  // 30 seconds, mono 16-bit
   const buf = new ArrayBuffer(44 + n * 2);
   const v = new DataView(buf);
   const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
@@ -961,7 +1013,7 @@ function stopLocalAudio() {
   if (snapAudio._watch) clearInterval(snapAudio._watch);
   if (snapAudio.mediaEl) { snapAudio.mediaEl.pause(); snapAudio.mediaEl.srcObject = null; snapAudio.mediaEl.remove(); }
   snapAudio = null; updateAudioBtn(false);
-  if (silenceEl) { silenceEl.pause(); silenceEl.removeAttribute('src'); silenceEl = null; }
+  if (silenceEl) { silenceEl.pause(); silenceEl.removeAttribute('src'); silenceEl.remove(); silenceEl = null; }
   syncMediaSession();
 }
 $('audio-btn').onclick = () => { if (snapAudio) stopLocalAudio(); else startLocalAudio(); };
@@ -1001,8 +1053,7 @@ function localResume() {
   }
   // If the stream socket died while paused (long background / lock), revive it so one
   // play press fully recovers instead of needing the plug toggle (stop→start).
-  const ws = snapAudio.ws;
-  if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) snapAudio._connect();
+  if (snapAudio._socketIsDead()) snapAudio._revive('resume');
   syncMediaSession();
 }
 
@@ -1031,14 +1082,26 @@ function armAutoplay() {
 }
 
 // ── JSON-RPC WebSocket ────────────────────────────────────────────────────────
+// Same wedged-CONNECTING problem as SnapAudio._socketIsDead: without the age
+// check, one socket stuck in CONNECTING makes connect() return early forever and
+// the control channel never comes back.
+function controlSocketIsDead() {
+  const ws = S.ws;
+  if (!ws) return true;
+  if (ws.readyState > 1) return true;   // CLOSING / CLOSED
+  return ws.readyState === 0 && Date.now() - S.wsAt > WS_CONNECT_TIMEOUT_MS;
+}
+
 function connect() {
   // Don't stack sockets: on-demand reconnect (sendControl) can race the 3s
   // onclose timer and the visibility handler.
-  if (S.ws && (S.ws.readyState === 0 || S.ws.readyState === 1)) return;
+  if (!controlSocketIsDead()) return;
+  if (S.ws) { S.ws.onopen = S.ws.onclose = S.ws.onerror = S.ws.onmessage = null; try { S.ws.close(); } catch (_) {} }
   setStatus('ing');
   // wss on https pages (mixed-content block), same as the /stream socket above.
   const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/jsonrpc');
   S.ws = ws;
+  S.wsAt = Date.now();
   ws.onopen  = () => { setStatus('conn'); rpc('Server.GetStatus', {}); flushPendingControl(); };
   ws.onclose = () => { setStatus('err'); setTimeout(connect, 3000); };
   ws.onerror = () => setStatus('err');
@@ -1686,14 +1749,10 @@ document.addEventListener('visibilitychange', () => {
     // Don't override a deliberate lockscreen pause (stream-locked local mode)
     if (snapAudio.ctx.state === 'suspended' && !S.localPaused) snapAudio.ctx.resume();
     if (snapAudio.mediaEl && !S.localPaused) Promise.resolve(snapAudio.mediaEl.play()).catch(() => {});
-    const ws = snapAudio.ws;
-    if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
-      dbg('visible again → reconnecting audio', 'i');
-      snapAudio._connect();
-    }
+    if (snapAudio._socketIsDead()) snapAudio._revive('visible again');
   }
   // Control socket too
-  if (!S.ws || S.ws.readyState > 1) connect();
+  if (controlSocketIsDead()) connect();
 });
 
 // Sheet detents: drag the handle up → expand to full screen; drag down →
