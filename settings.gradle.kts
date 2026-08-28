@@ -29,6 +29,7 @@ dependencyResolutionManagement {
 rootProject.name = "capullo-audio"
 include(":capullo-audio")
 include(":capullo-audio-ui") // shared client Compose UI (control sheet, later now-playing); depends on :capullo-audio
+include(":capullo-tunnel") // optional public-link tunnel: cloudflared .so + TunnelManager; standalone
 include(":app") // harness/demo app: exercises CapulloAudioEngine + packages the snapcast .so
 
 // Dev/release toggle: when the SPI repo is checked out as a sibling (local co-development or the

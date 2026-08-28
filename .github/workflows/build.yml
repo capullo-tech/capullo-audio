@@ -38,6 +38,12 @@ jobs:
       - name: Run contract-validation unit test
         working-directory: capullo-audio
         run: ./gradlew :capullo-audio:testDebugUnitTest --no-daemon
+      # The tunnel module is in neither the engine's test task nor the harness APK, so build it
+      # explicitly: this is what keeps TunnelUrlParserTest running and proves the AAR carries
+      # libcloudflared.so per ABI.
+      - name: Build the tunnel module + its parser test
+        working-directory: capullo-audio
+        run: ./gradlew :capullo-tunnel:assembleRelease :capullo-tunnel:testDebugUnitTest --no-daemon
       - name: Assemble harness APK (packages the snapcast .so)
         working-directory: capullo-audio
         run: ./gradlew :app:assembleDebug --no-daemon

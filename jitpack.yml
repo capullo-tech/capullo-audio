@@ -1,10 +1,14 @@
-# jitpack builds & publishes the two library modules (the :app harness is dev-only):
-#   com.github.capullo-tech:capullo-audio      (headless engine)
-#   com.github.capullo-tech:capullo-audio-ui   (shared Compose control sheet; api-depends on the engine)
-# Both are published in one build so capullo-audio-ui's POM dep on capullo-audio resolves to the same
-# commit version. Resolves contracts + lib-snapcast-android from jitpack; needs the Android SDK, which
-# jitpack provides.
+# jitpack builds & publishes the three library modules (the :app harness is dev-only):
+#   capullo-audio    (headless engine)
+#   capullo-audio-ui (shared Compose control sheet; api-depends on the engine)
+#   capullo-tunnel   (optional public-link tunnel; depends on neither of the other two)
+# All three live at the NESTED group com.github.capullo-tech.capullo-audio - modules whose name is
+# not the repo name are published there only, so consumers must use the nested group for all of them
+# (flat + nested = the same classes twice).
+# All three are published in one build so capullo-audio-ui's POM dep on capullo-audio resolves to the
+# same commit version, and one pin covers the set. Resolves contracts + lib-snapcast-android from
+# jitpack; needs the Android SDK, which jitpack provides.
 jdk:
   - openjdk17
 install:
-  - ./gradlew :capullo-audio:publishToMavenLocal :capullo-audio-ui:publishToMavenLocal -x test -x lint
+  - ./gradlew :capullo-audio:publishToMavenLocal :capullo-audio-ui:publishToMavenLocal :capullo-tunnel:publishToMavenLocal -x test -x lint
