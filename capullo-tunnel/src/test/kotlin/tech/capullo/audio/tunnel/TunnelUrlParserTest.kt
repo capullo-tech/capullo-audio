@@ -38,6 +38,34 @@ class TunnelUrlParserTest {
     }
 
     @Test
+    fun `quick-service api endpoint in a fatal error line does not match`() {
+        // A failed quick-tunnel POST exits cloudflared with Go's url.Error embedding the
+        // full API endpoint. The old single-label-tolerant regex scraped exactly this line
+        // as the "public" URL, so failure-prone networks announced api.trycloudflare.com
+        // every single time. The endpoint host has no hyphen; the tunnel's random word
+        // list always does.
+        val line =
+            "2026-08-31T22:15:04Z ERR failed to request quick Tunnel " +
+                "error=\"Post \\\"https://api.trycloudflare.com/tunnel\\\": " +
+                "dial tcp: lookup api.trycloudflare.com: no such host\""
+        assertNull(parsePublicUrl(line))
+    }
+
+    @Test
+    fun `banner url wins over an earlier api-endpoint error line`() {
+        // Same stream shape as a retry that eventually succeeds: the fatal-looking line
+        // mentions the endpoint, the banner afterwards carries the real tunnel URL.
+        val log = """
+            2026-08-31T22:15:04Z ERR failed to request quick Tunnel error="Post "https://api.trycloudflare.com/tunnel": context deadline exceeded"
+            2026-08-31T22:15:09Z INF |  https://attempt-quarter-visible-origin.trycloudflare.com  |
+        """.trimIndent()
+        assertEquals(
+            "https://attempt-quarter-visible-origin.trycloudflare.com",
+            parsePublicUrl(log),
+        )
+    }
+
+    @Test
     fun `log without url returns null`() {
         assertNull(parsePublicUrl("2026-08-19T13:48:03Z INF Initial protocol quic"))
     }

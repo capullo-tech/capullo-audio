@@ -86,7 +86,14 @@ private val ANSI_RE = Regex("\u001B\\[[0-9;?]*[A-Za-z]")
 // Only the tunnel URL itself matches: the banner also logs doc/ToS links
 // (www.cloudflare.com, developers.cloudflare.com) BEFORE the URL line, and the
 // "Requesting new quick Tunnel on trycloudflare.com..." line has no https:// host.
-private val PUBLIC_URL_RE = Regex("""https://[a-z0-9-]+\.trycloudflare\.com""")
+// The host must also be HYPHENATED multi-word: quick-tunnel names are random word
+// lists (hobby-lake-adopt-louise), while the only other *.trycloudflare.com URL
+// cloudflared ever prints is single-label - the quick-service API endpoint, which
+// Go's url.Error embeds verbatim in the fatal line when the tunnel request fails:
+//   ERR failed to request quick Tunnel error="Post \"https://api.trycloudflare.com/tunnel\": ..."
+// First-match-wins over that line used to scrape the API endpoint as the "public"
+// URL, announcing a dead link on every failure-prone network.
+private val PUBLIC_URL_RE = Regex("""https://[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com""")
 
 /** Extracts the quick-tunnel URL from cloudflared log output (null if none yet). */
 internal fun parsePublicUrl(output: String): String? = PUBLIC_URL_RE.find(ANSI_RE.replace(output, ""))?.value
