@@ -17,13 +17,18 @@ plugins {
 // builds are static Go binaries whose pure-Go resolver needs /etc/resolv.conf (absent on
 // Android → no DNS); Termux's package is a GOOS=android (bionic) build of the same
 // Apache-2.0 sources, verified working on-device. Pinned by version + per-ABI sha256 -
-// bump deliberately.
-val cloudflaredVersion = "2026.8.2"
+// bump deliberately. NOTE: Termux's apt pool keeps ONLY the newest cloudflared release,
+// so every upstream release prunes the pinned .deb - a fresh build (jitpack, CI, new
+// machine) then fails at fetchCloudflared with a 404 until this is bumped to the
+// current pool version with fresh checksums. 2026.8.2 -> 2026.8.3 is exactly that:
+// no cloudflared behaviour change (cmd/cloudflared/tunnel/quick_tunnel.go is identical
+// between the two tags, and the quick-tunnel log lines match the parser's fixtures).
+val cloudflaredVersion = "2026.8.3"
 val cloudflaredAbis = mapOf(
-    "arm64-v8a" to ("aarch64" to "7ecda51a05326f34a832be6e763eb7c6f71edf4ad49f096b291fa6f8ec5a5377"),
-    "armeabi-v7a" to ("arm" to "d2177a6b0724885842d3ec56176aef08ceb7b2ab9d43465054e710d41a583cc9"),
-    "x86" to ("i686" to "9e63f8f5dc24c4d31fa4bc9f8ef5cf02bf072c6e1243d0538a34a8f18688fc4f"),
-    "x86_64" to ("x86_64" to "33a0d6e69fbc738b98de03d51e3de7bf5de1b28e0b6501ed6cba0cc74ab8cd0e"),
+    "arm64-v8a" to ("aarch64" to "64f5f4096afcc9234eda7384bf6e59516646285f46ce2ec84f52a4399b082820"),
+    "armeabi-v7a" to ("arm" to "3fcf8db38eb3e7ffee3590e6c3b18fc47e8c1b43bf2b642d74ae4426eaf83248"),
+    "x86" to ("i686" to "438fc6a96f4da65f3f344cb6d29f9988c2a97932817bf1f4b5adc1e9c7d08047"),
+    "x86_64" to ("x86_64" to "dbd7600352ae509c208936cdddb9ff36025e0f4c7ae540f616c534c832686574"),
 )
 
 // A typed task with a DirectoryProperty output, not a plain `tasks.register {}`: AGP 9 refuses a
