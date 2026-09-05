@@ -11,6 +11,7 @@ import androidx.core.content.edit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -130,6 +131,27 @@ class SnapclientProcess(private val context: Context) {
             process.waitFor()
         } catch (e: Exception) {
             Log.e(TAG, "Snapclient error", e)
+        }
+        // REACHED WHENEVER THE NATIVE CLIENT'S STDOUT ENDS, AND THE TWO REASONS ARE NOT THE SAME.
+        //
+        // Either a caller stopped us (destroy() closed the stream) or libsnapclient.so exited on
+        // its own. Only the second is a fault, and before this the two were indistinguishable:
+        // start() returned normally either way, left connectionState on its last value, and the
+        // caller's launch{} simply completed. A broadcaster then went silent with a healthy server,
+        // a healthy app and nothing anywhere saying its own speaker had stopped (rig, 2026-09-05:
+        // gone for 1h50m before anyone noticed).
+        //
+        // Told apart by the JOB, not by a flag: readLine() is not cancellable, so an intentional
+        // stop usually leaves the loop through a null line rather than a CancellationException, and
+        // every caller cancels this coroutine BEFORE destroying the process. So "still active here"
+        // means nobody asked for this.
+        val code = runCatching { process.waitFor() }.getOrNull()
+        _process = null
+        if (isActive) {
+            Log.e(TAG, "snapclient exited on its own (code=$code) - this device is now silent")
+            _connectionState.update { ConnectionState.ERROR }
+        } else {
+            Log.d(TAG, "snapclient stopped as asked (code=$code)")
         }
     }
 
