@@ -20,15 +20,21 @@ plugins {
 // bump deliberately. NOTE: Termux's apt pool keeps ONLY the newest cloudflared release,
 // so every upstream release prunes the pinned .deb - a fresh build (jitpack, CI, new
 // machine) then fails at fetchCloudflared with a 404 until this is bumped to the
-// current pool version with fresh checksums. 2026.8.2 -> 2026.8.3 is exactly that:
+// current pool version with fresh checksums. 2026.8.2 -> 2026.8.3 was exactly that:
 // no cloudflared behaviour change (cmd/cloudflared/tunnel/quick_tunnel.go is identical
 // between the two tags, and the quick-tunnel log lines match the parser's fixtures).
-val cloudflaredVersion = "2026.8.3"
+// 2026.8.3 -> 2026.10.7: quick_tunnel.go did change, but only to add an opt-in protected
+// (OTP) mode gated on --allowed-mail, which CloudflaredBackend never passes. The public
+// path's startup banner (quickTunnelStartupLines with isProtected=false) emits the same two
+// lines through the same cliutil.LogTable, and normalizeQuickTunnelURL is the same
+// https://-prefixing, so parsePublicUrl's input is unchanged. New provisioning error
+// messages carry no https:// host, so they can't false-match PUBLIC_URL_RE either.
+val cloudflaredVersion = "2026.10.7"
 val cloudflaredAbis = mapOf(
-    "arm64-v8a" to ("aarch64" to "64f5f4096afcc9234eda7384bf6e59516646285f46ce2ec84f52a4399b082820"),
-    "armeabi-v7a" to ("arm" to "3fcf8db38eb3e7ffee3590e6c3b18fc47e8c1b43bf2b642d74ae4426eaf83248"),
-    "x86" to ("i686" to "438fc6a96f4da65f3f344cb6d29f9988c2a97932817bf1f4b5adc1e9c7d08047"),
-    "x86_64" to ("x86_64" to "dbd7600352ae509c208936cdddb9ff36025e0f4c7ae540f616c534c832686574"),
+    "arm64-v8a" to ("aarch64" to "06a4f5543329c1ca0c64ef23f3d0d5dd9f02689a7887d35414c3b04a827a0195"),
+    "armeabi-v7a" to ("arm" to "104ba0e20cb9604e27d96d814759ada625e9fb50b8b3f721645bb9a8e7a530f3"),
+    "x86" to ("i686" to "92ea12d3ac484d63b0de4713dfe0bd13e8b0a128cb482609e716c5cc3efe6c09"),
+    "x86_64" to ("x86_64" to "a5cebba03d27c1f5cc9095c5c3ea8d9d6c6cf51e3de011422516860f06d53b08"),
 )
 
 // A typed task with a DirectoryProperty output, not a plain `tasks.register {}`: AGP 9 refuses a
