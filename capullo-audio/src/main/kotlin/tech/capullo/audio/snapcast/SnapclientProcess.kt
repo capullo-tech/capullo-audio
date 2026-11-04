@@ -100,7 +100,24 @@ class SnapclientProcess(private val context: Context) {
         if (rate != null) env["SAMPLE_RATE"] = rate
         if (fpb != null) env["FRAMES_PER_BUFFER"] = fpb
 
-        val process = pb.start().also { _process = it }
+        // A stop can land between the caller's isActive check and the spawn; don't start a client
+        // nobody will own. And a spawn failure (fork EAGAIN/ENOMEM, missing binary) is reported as
+        // a fault rather than thrown: a restart loop calls this repeatedly, often in exactly the
+        // conditions that killed the last client, and an escaped IOException crashes the app.
+        ensureActive()
+        val process = try {
+            pb.start()
+        } catch (e: java.io.IOException) {
+            Log.e(TAG, "snapclient spawn failed", e)
+            _connectionState.update { ConnectionState.ERROR }
+            return@coroutineScope
+        }
+        _process = process
+        if (!isActive) {
+            process.destroyForcibly()
+            if (_process === process) _process = null
+            return@coroutineScope
+        }
         try {
             val reader = BufferedReader(InputStreamReader(process.inputStream))
             var line: String?
@@ -137,10 +154,9 @@ class SnapclientProcess(private val context: Context) {
         //
         // Either a caller stopped us (destroy() closed the stream) or libsnapclient.so exited on
         // its own. Only the second is a fault, and before this the two were indistinguishable:
-        // start() returned normally either way, left connectionState on its last value, and the
-        // caller's launch{} simply completed. A broadcaster then went silent with a healthy server,
-        // a healthy app and nothing anywhere saying its own speaker had stopped (rig, 2026-09-05:
-        // gone for 1h50m before anyone noticed).
+        // start() returned normally either way and left connectionState on its last value, so a
+        // device could go silent with a healthy server and nothing anywhere saying its own speaker
+        // had stopped (reproduced on the rig with kill -9).
         //
         // Told apart by the JOB, not by a flag: readLine() is not cancellable, so an intentional
         // stop usually leaves the loop through a null line rather than a CancellationException, and
@@ -151,7 +167,7 @@ class SnapclientProcess(private val context: Context) {
         // clearing that would leave destroy() unable to stop it.
         if (_process === process) _process = null
         if (isActive) {
-            Log.e(TAG, "snapclient exited on its own (code=$code) - this device is now silent")
+            Log.e(TAG, "snapclient exited on its own (code=$code)")
             _connectionState.update { ConnectionState.ERROR }
         } else {
             Log.d(TAG, "snapclient stopped as asked (code=$code)")

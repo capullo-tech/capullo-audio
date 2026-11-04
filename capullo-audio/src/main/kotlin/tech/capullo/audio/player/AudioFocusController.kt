@@ -219,15 +219,24 @@ class AudioFocusController(
     private val quietWatcher = object : Runnable {
         override fun run() {
             if (!pausedByFocusLoss) return
-            if (foreignMediaActive()) {
+            // A ringing or active call (cellular or VoIP in communication mode) has no app-side
+            // player in the playback list, so foreignMediaActive() alone reads it as quiet.
+            if (foreignMediaActive() || audioManager.mode != AudioManager.MODE_NORMAL) {
                 quietSince = 0L
             } else {
                 val now = System.currentTimeMillis()
                 when {
                     quietSince == 0L -> quietSince = now
                     now - quietSince >= QUIET_RESUME_MS -> {
-                        resumeLocalPlayback(reclaimFocus = true, reason = "other player quiet")
-                        return
+                        // Opportunistic: only resume with a grant. The system refuses focus during
+                        // a call or ring, and playing without it would put the speaker on top of
+                        // the call with nothing to pause it again. refocus() (an explicit user act)
+                        // still plays regardless; this background path never does.
+                        if (request()) {
+                            resumeLocalPlayback(reclaimFocus = false, reason = "other player quiet")
+                            return
+                        }
+                        quietSince = 0L
                     }
                 }
             }
@@ -301,16 +310,19 @@ class AudioFocusController(
         private const val QUIET_RESUME_MS = 3_000L
 
         /** Usages that mean "somebody is listening to something" and so should hold the speaker.
-         *  Sonification and notifications are deliberately absent: a message ping must not keep
-         *  postponing the resume. USAGE_VOICE_COMMUNICATION is present so a VoIP app holding
-         *  permanent focus for a call is not read as quiet and talked over. USAGE_UNKNOWN is
-         *  included because it is what an anonymized or attribute-less player reports, and missing
-         *  a real one costs more than a short delay. */
+         *  Short sonification and notification pings are deliberately absent: a message ping must
+         *  not keep postponing the resume. USAGE_VOICE_COMMUNICATION is present so a VoIP app
+         *  holding permanent focus for a call is not read as quiet and talked over; ALARM and
+         *  NOTIFICATION_RINGTONE because they are long-running sounds a user must hear, not pings.
+         *  USAGE_UNKNOWN is included because it is what an anonymized or attribute-less player
+         *  reports, and missing a real one costs more than a short delay. */
         private val CONTENT_USAGES = setOf(
             AudioAttributes.USAGE_MEDIA,
             AudioAttributes.USAGE_GAME,
             AudioAttributes.USAGE_ASSISTANT,
             AudioAttributes.USAGE_VOICE_COMMUNICATION,
+            AudioAttributes.USAGE_ALARM,
+            AudioAttributes.USAGE_NOTIFICATION_RINGTONE,
             AudioAttributes.USAGE_UNKNOWN,
         )
     }
