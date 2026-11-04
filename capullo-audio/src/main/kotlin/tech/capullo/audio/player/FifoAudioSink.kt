@@ -150,8 +150,38 @@ class FifoAudioBufferSink(
         fd = null // closed via the stream
     }
 
+    // --- Pause gate (see PcmPauseGate) ---
+    // Guarded by writeLock. 2 s of 48 kHz stereo 16-bit: far more than the few hundred ms the
+    // player still pushes after a pause.
+    private val pauseGate = PcmPauseGate(capacityBytes = 48_000 * 4 * 2, fadeBytes = 48_000 * 4 * FADE_MS / 1000)
+    @Volatile private var releaseHeld = false
+
+    /**
+     * Call when the user pauses. Audio the player still pushes afterwards is held instead of
+     * broadcast (after a short fade-out), so listeners hear one clean stop rather than blips.
+     */
+    fun pauseOutput() {
+        synchronized(writeLock) {
+            releaseHeld = false
+            pauseGate.pause()
+        }
+    }
+
+    /**
+     * Call when playback resumes. The held audio is written, faded in, just before the next buffer
+     * on the playback thread - not here, because a FIFO write can block until snapserver reads.
+     */
+    fun resumeOutput() {
+        releaseHeld = true
+    }
+
     override fun flush(sampleRateHz: Int, channelCount: Int, encoding: Int) {
-        // Called on (re)configure - the chain guarantees 48000/2ch/16-bit here.
+        // Called on (re)configure and on seek/stop - the chain guarantees 48000/2ch/16-bit here.
+        // Anything held from before the flush belongs to a position the player has left.
+        synchronized(writeLock) {
+            pauseGate.discard()
+            releaseHeld = false
+        }
         Log.d(TAG, "FIFO sink format: ${sampleRateHz}Hz ${channelCount}ch enc=$encoding")
         open()
     }
@@ -161,19 +191,36 @@ class FifoAudioBufferSink(
         // Serialize with the silence keep-alive so the two writers never interleave into the pipe.
         synchronized(writeLock) {
             val o = out ?: return
-            lastRealWriteNs = System.nanoTime() // marks real audio flowing → keep-alive backs off
             try {
-                pcmTap?.write(buffer)
-                val ch = o.channel
-                while (buffer.hasRemaining()) ch.write(buffer)
+                if (releaseHeld) {
+                    releaseHeld = false
+                    val dropped = pauseGate.droppedBytes
+                    pauseGate.resume()?.let { write(o, it) }
+                    if (dropped > 0) Log.w(TAG, "pause gate overflowed, dropped $dropped bytes in total")
+                }
+                if (pauseGate.holding) {
+                    pauseGate.offer(buffer)?.let { write(o, it) }
+                    return
+                }
+                write(o, buffer)
             } catch (e: Exception) {
                 if (!closed) Log.w(TAG, "FIFO write failed: ${e.message}")
             }
         }
     }
 
+    private fun write(o: FileOutputStream, buffer: ByteBuffer) {
+        lastRealWriteNs = System.nanoTime() // marks real audio flowing → keep-alive backs off
+        pcmTap?.write(buffer)
+        val ch = o.channel
+        while (buffer.hasRemaining()) ch.write(buffer)
+    }
+
     companion object {
         private const val TAG = "FifoAudioSink"
+
+        // Length of the fade at a pause and at the matching resume.
+        private const val FADE_MS = 20
 
         // Keep-alive silence chunk (~40ms) and the gap after which it kicks in. GAP_THRESHOLD_MS is
         // comfortably under the snapserver's ~120ms AsioStream idle timeout; SILENCE_CHUNK_MS paces
