@@ -114,6 +114,30 @@ class LoudnessProcessorsTest {
     }
 
     @Test
+    fun `a sudden loud passage pulls boost down within one block`() {
+        val (a, g) = agc()
+        run(a, sine(48_000, -30.0, 70.0), 48_000)
+        assertTrue(g.gain > 1.9f)
+        run(a, sine(48_000, -3.0, 0.2), 48_000)
+        val peak = 32767 * 10.0.pow(-3.0 / 20)
+        assertTrue("gain ${g.gain} would clip a -3 dBFS peak", g.gain * peak <= 0.89 * 32767 + 1)
+    }
+
+    @Test
+    fun `reconfiguring drops a carried-over boost but keeps a cut`() {
+        val (a, g) = agc()
+        run(a, sine(48_000, -30.0, 70.0), 48_000)
+        assertTrue(g.gain > 1.9f)
+        a.configure(format(48_000)); a.flush()
+        assertEquals(1f, g.gain, 0f)
+        run(a, sine(48_000, -6.0, 40.0), 48_000)
+        val cut = g.gain
+        assertTrue("expected a cut, got $cut", cut < 1f)
+        a.configure(format(48_000)); a.flush()
+        assertEquals(cut, g.gain, 0f)
+    }
+
+    @Test
     fun `gain processor at unity is a bit-exact passthrough`() {
         val g = GainAudioProcessor()
         g.configure(format(48_000))

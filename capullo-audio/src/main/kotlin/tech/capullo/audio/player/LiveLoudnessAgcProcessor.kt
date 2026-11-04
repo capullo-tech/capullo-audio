@@ -107,7 +107,11 @@ class LiveLoudnessAgcProcessor(
         shelf = KWeighting.shelf(sampleRate)
         highPass = KWeighting.highPass(sampleRate)
         resetWindow()
-        appliedGain = gainProcessor.gain
+        // Keep a carried-over CUT (a new sink for the same or a louder source is fine with it) but
+        // never a carried-over BOOST: a quiet station's +6 dB applied to the next, louder one
+        // would clip until the window caught up. Boost has to be re-earned from this source.
+        appliedGain = minOf(gainProcessor.gain, 1f)
+        gainProcessor.gain = appliedGain
         return inputAudioFormat
     }
 
@@ -176,6 +180,7 @@ class LiveLoudnessAgcProcessor(
         rollingPeak[rollingCursor] = subBlockPeak
         rollingCursor = (rollingCursor + 1) % ROLLING_WINDOW_BLOCKS
         if (rollingFilled < ROLLING_WINDOW_BLOCKS) rollingFilled++
+        guardPeak(subBlockPeak)
         subBlockSumSq = 0.0
         subBlockPeak = 0
         subBlockCursor = 0
@@ -222,9 +227,25 @@ class LiveLoudnessAgcProcessor(
             val peakCap = PEAK_CEILING * 32767f / windowPeak
             if (targetGainLinear > peakCap) targetGainLinear = maxOf(peakCap, minOf(1f, targetGainLinear))
         }
-        // Exponential slew toward the target, not an instantaneous jump - see class doc.
-        appliedGain += (targetGainLinear - appliedGain) * SMOOTHING_ALPHA
+        // Slew: boost rises slowly (see class doc), but a gain that must come DOWN does so fast,
+        // since staying high on louder material means clipping, which is worse than a quick dip.
+        val alpha = if (targetGainLinear < appliedGain) ATTACK_ALPHA else SMOOTHING_ALPHA
+        appliedGain += (targetGainLinear - appliedGain) * alpha
         gainProcessor.gain = appliedGain
+    }
+
+    /**
+     * Runs on every sub-block, before the window has enough history for [updateGain]: if the
+     * current boost would push this block's peak past [PEAK_CEILING], drop it right away. Catches a
+     * sudden loud passage or a station switch within ~100 ms instead of after the slow window does.
+     */
+    private fun guardPeak(blockPeak: Int) {
+        if (appliedGain <= 1f || blockPeak <= 0) return
+        val cap = maxOf(1f, PEAK_CEILING * 32767f / blockPeak)
+        if (appliedGain > cap) {
+            appliedGain = cap
+            gainProcessor.gain = appliedGain
+        }
     }
 
     companion object {
@@ -232,6 +253,7 @@ class LiveLoudnessAgcProcessor(
         private const val ROLLING_WINDOW_BLOCKS = 300 // 300 * 100ms = 30s of history
         private const val MIN_BLOCKS_BEFORE_ADJUST = 20 // ~2s - don't react to a near-empty window
         private const val SMOOTHING_ALPHA = 0.01f // ~10s time constant at 10 Hz block cadence
+        private const val ATTACK_ALPHA = 0.2f // ~0.5s time constant when gain must drop
         private const val MIN_GAIN_DB = -12f
         private const val MAX_GAIN_DB = 6f
 
