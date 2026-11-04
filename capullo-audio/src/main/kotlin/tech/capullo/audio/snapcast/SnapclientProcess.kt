@@ -50,6 +50,7 @@ class SnapclientProcess(private val context: Context) {
     val storedHostId: String
         get() = localHostId(context)
 
+    @Volatile
     private var _process: Process? = null
 
     fun destroy() {
@@ -146,7 +147,9 @@ class SnapclientProcess(private val context: Context) {
         // every caller cancels this coroutine BEFORE destroying the process. So "still active here"
         // means nobody asked for this.
         val code = runCatching { process.waitFor() }.getOrNull()
-        _process = null
+        // Only if still ours: a restarted run may already have stored its own process here, and
+        // clearing that would leave destroy() unable to stop it.
+        if (_process === process) _process = null
         if (isActive) {
             Log.e(TAG, "snapclient exited on its own (code=$code) - this device is now silent")
             _connectionState.update { ConnectionState.ERROR }
