@@ -199,7 +199,9 @@ class FifoAudioBufferSink(
                     if (dropped > 0) Log.w(TAG, "pause gate overflowed, dropped $dropped bytes in total")
                 }
                 if (pauseGate.holding) {
-                    pauseGate.offer(buffer)?.let { write(o, it) }
+                    // First audio after the pause arriving late (snapserver already idle): a
+                    // fade-out now would play on its own as a blip, so hold all of it.
+                    pauseGate.offer(buffer, fadeOutAllowed = !gapExceeded())?.let { write(o, it) }
                     return
                 }
                 write(o, buffer)

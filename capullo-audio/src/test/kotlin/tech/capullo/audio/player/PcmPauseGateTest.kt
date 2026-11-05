@@ -51,6 +51,19 @@ class PcmPauseGateTest {
         assertEquals((200 - 40) * 2, rest.size)
     }
 
+    /** Output already quiet when the first held audio arrives: no tail, all held, resume fades in. */
+    @Test
+    fun `late first buffer is held whole with no fade-out tail`() {
+        val g = PcmPauseGate(capacityBytes = 10_000, fadeBytes = fade)
+        g.pause()
+        assertNull(g.offer(frames(200), fadeOutAllowed = false))
+        assertNull(g.offer(frames(100))) // later buffers can't produce a tail either
+        val rest = shorts(g.resume()!!)
+        assertEquals(300 * 2, rest.size)
+        assertEquals(0, rest[0].toInt())
+        assertEquals(10_000, rest[rest.size - 1].toInt())
+    }
+
     @Test
     fun `resume before a tail was made returns the held audio unfaded`() {
         val g = PcmPauseGate(capacityBytes = 10_000, fadeBytes = fade)

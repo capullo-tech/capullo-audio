@@ -49,8 +49,13 @@ internal class PcmPauseGate(capacityBytes: Int, private val fadeBytes: Int) {
      * Stores [input] (consuming it) while holding. Returns the faded-out tail once enough audio has
      * arrived to make it, else null. The returned buffer is reused - write it out before the next
      * call.
+     *
+     * [fadeOutAllowed] = false when the output has already gone quiet since the pause: writing a
+     * fade-out then would itself be the isolated fragment this class exists to prevent, so
+     * everything is held instead (resume still fades it in).
      */
-    fun offer(input: ByteBuffer): ByteBuffer? {
+    fun offer(input: ByteBuffer, fadeOutAllowed: Boolean = true): ByteBuffer? {
+        if (!fadedOut && held == 0 && !fadeOutAllowed) fadedOut = true
         val n = input.remaining()
         val room = ring.size - held
         val take = minOf(n, room)
