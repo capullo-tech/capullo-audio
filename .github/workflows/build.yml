@@ -44,6 +44,14 @@ jobs:
       - name: Build the tunnel module + its parser test
         working-directory: capullo-audio
         run: ./gradlew :capullo-tunnel:assembleRelease :capullo-tunnel:testDebugUnitTest --no-daemon
+      # The fallback only helps if the pinned version is actually mirrored. Fetch with Termux
+      # skipped and a cold .deb cache, so a pin bump that forgot the mirror release fails here
+      # instead of months later when Termux prunes it.
+      - name: Prove the pinned cloudflared is mirrored
+        working-directory: capullo-audio
+        run: |
+          rm -rf capullo-tunnel/build/cloudflared
+          ./gradlew :capullo-tunnel:fetchCloudflared --rerun-tasks -PcloudflaredMirrorOnly=true --no-daemon
       - name: Assemble harness APK (packages the snapcast .so)
         working-directory: capullo-audio
         run: ./gradlew :app:assembleDebug --no-daemon
