@@ -154,6 +154,10 @@ class FifoAudioBufferSink(
     // Guarded by writeLock. 2 s of 48 kHz stereo 16-bit: far more than the few hundred ms the
     // player still pushes after a pause.
     private val pauseGate = PcmPauseGate(capacityBytes = 48_000 * 4 * 2, fadeBytes = 48_000 * 4 * FADE_MS / 1000)
+    // The user-visible pause state. Both setters are lock-free: writeLock is held across blocking
+    // FIFO writes, and these are called from the main thread. The gate itself is only touched on
+    // the playback thread, under writeLock, in handleBuffer/flush.
+    @Volatile private var paused = false
     @Volatile private var releaseHeld = false
 
     /**
@@ -161,10 +165,8 @@ class FifoAudioBufferSink(
      * broadcast (after a short fade-out), so listeners hear one clean stop rather than blips.
      */
     fun pauseOutput() {
-        synchronized(writeLock) {
-            releaseHeld = false
-            pauseGate.pause()
-        }
+        releaseHeld = false
+        paused = true
     }
 
     /**
@@ -172,6 +174,7 @@ class FifoAudioBufferSink(
      * on the playback thread - not here, because a FIFO write can block until snapserver reads.
      */
     fun resumeOutput() {
+        paused = false
         releaseHeld = true
     }
 
@@ -181,6 +184,10 @@ class FifoAudioBufferSink(
         synchronized(writeLock) {
             pauseGate.discard()
             releaseHeld = false
+            // A seek while paused flushes too; the player then refills its buffer, which must
+            // stay held. Keyed off [paused], not the gate, so a flush between resumeOutput() and
+            // the next buffer can't re-enter the hold.
+            if (paused) pauseGate.pause()
         }
         Log.d(TAG, "FIFO sink format: ${sampleRateHz}Hz ${channelCount}ch enc=$encoding")
         open()
@@ -192,6 +199,7 @@ class FifoAudioBufferSink(
         synchronized(writeLock) {
             val o = out ?: return
             try {
+                if (paused && !pauseGate.holding) pauseGate.pause()
                 if (releaseHeld) {
                     releaseHeld = false
                     val dropped = pauseGate.droppedBytes
