@@ -25,8 +25,13 @@ import android.util.Log
  *  2. **[AudioManager.AUDIOFOCUS_GAIN]** - reliably delivered only after *transient* losses (a call,
  *     a navigation prompt), so a transient loss just waits for GAIN.
  *  3. **Quiet-watcher** - after a *permanent* loss Android never redistributes focus (no GAIN when
- *     e.g. Spotify/YouTube simply stop), so this polls [AudioManager.isMusicActive] and resumes once
- *     the other player has been silent for [QUIET_RESUME_MS].
+ *     e.g. Spotify/YouTube simply stop), so this polls [foreignMediaActive] and resumes once the
+ *     other player has been silent for [QUIET_RESUME_MS]. Read that function before changing the
+ *     signal: the obvious [AudioManager.isMusicActive] is wrong here, and wrong in a way that
+ *     leaves a broadcaster silent indefinitely. This works on **API 34+ only**: below that the
+ *     platform has no public signal that tells this app's own muted player from a foreign one, so
+ *     API 26-33 keeps the old behaviour - the watcher never fires while broadcasting and recovery
+ *     from a permanent loss is [refocus] alone.
  *
  * `CAN_DUCK` losses are ignored (kept playing at full volume): a native snapclient can't be ducked
  * cheaply and radio over a brief system beep is acceptable - hence [setWillPauseWhenDucked]`(false)`.
@@ -48,51 +53,92 @@ class AudioFocusController(
     /** True while the local snapclient is stopped *because* focus was lost (not a user stop). */
     private var pausedByFocusLoss = false
 
+    @Volatile
+    private var suppressing: Boolean = false
+
+    /** The focus loss a suppression window swallowed, or 0. Replayed when suppression lifts, unless
+     *  a GAIN, a granted [request] or [abandon] clears it first (see [suppressLosses]). */
+    private var suppressedLoss: Int = 0
+
     /** While true, focus LOSSES are ignored entirely (no state transition, no onPause).
      *  Used during mic sync calibration: some OEMs (ColorOS) signal a focus loss when the
      *  app's own recorder opens, which would silence the reference speaker mid-measurement.
      *  Losses are only suppressed for the seconds a calibration runs, started deliberately
-     *  by the user, so missing a genuine transient loss (a call) is an accepted trade. */
-    @Volatile
-    var suppressLosses: Boolean = false
+     *  by the user, so missing a genuine transient loss (a call) is an accepted trade.
+     *
+     *  A swallowed loss is REPLAYED when suppression lifts, and that is not optional. Dropping
+     *  one outright leaves [hasFocus] true and [pausedByFocusLoss] false while focus is genuinely
+     *  gone at the OS level, and a permanent loss is never redistributed, so no GAIN ever arrives,
+     *  the quiet-watcher is never armed, and [refocus] returns at its first line forever. The
+     *  controller would be wedged past even a foreground reopen, which is worse than the loss it
+     *  was protecting the measurement from.
+     *
+     *  The latch holds the most recent word on where focus stands, so anything later that ALSO
+     *  says where it stands clears it: a GAIN, a GRANTED [request], or [abandon]. Replaying an
+     *  older loss past one of those pauses a client that correctly holds focus. LOSS_TRANSIENT
+     *  then GAIN inside one calibration is the plain case: the replay calls [onPause] and then
+     *  waits for a GAIN that has already come, so the speaker stays silent until [refocus].
+     *
+     *  If suppression is back on by the time the posted replay runs (back-to-back calibrations),
+     *  the latch is left untouched and the next lift replays it. */
+    var suppressLosses: Boolean
+        get() = suppressing
+        set(value) {
+            val was = suppressing
+            suppressing = value
+            if (was && !value) mainHandler.post { replaySuppressedLoss() }
+        }
+
+    private fun replaySuppressedLoss() {
+        // Re-suppressed before this ran: leave the latch for the next lift to replay.
+        if (suppressing) return
+        val change = suppressedLoss
+        suppressedLoss = 0
+        if (change == 0) return
+        Log.d(TAG, "replaying focus loss $change suppressed during calibration")
+        handleLoss(change)
+    }
 
     private val listener = AudioManager.OnAudioFocusChangeListener { change ->
         Log.d(TAG, "onAudioFocusChange: $change (hasFocus=$hasFocus, suppressLosses=$suppressLosses)")
         if (suppressLosses &&
             (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
         ) {
-            Log.d(TAG, "focus loss ignored (calibration in progress)")
+            // LATCHED, not dropped - see [suppressLosses]. A later loss overwrites an earlier one
+            // because only the most recent describes where focus actually stands; a GAIN, a granted
+            // request or abandon() clears it for the same reason.
+            suppressedLoss = change
+            Log.d(TAG, "focus loss ignored (calibration in progress), latched for replay")
             return@OnAudioFocusChangeListener
         }
         when (change) {
-            AudioManager.AUDIOFOCUS_LOSS -> {
-                // Permanent loss: another app took over and Android won't redistribute focus back.
-                // Stop the local snapclient and arm the quiet-watcher to reclaim once it goes silent.
-                if (hasFocus) {
-                    hasFocus = false
-                    pausedByFocusLoss = true
-                    onPause()
-                    armQuietWatcher()
-                    Log.d(TAG, "focus lost (permanent) -> local paused, quiet-watcher armed")
-                }
-            }
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                // Transient loss (call, nav prompt): stop, but DON'T arm the watcher - during a call
-                // isMusicActive is false and the watcher would blast audio into the call. GAIN is
-                // reliably delivered when the transient owner finishes.
-                if (hasFocus) {
-                    hasFocus = false
-                    pausedByFocusLoss = true
-                    onPause()
-                    Log.d(TAG, "focus lost (transient) -> local paused, awaiting GAIN")
-                }
-            }
+            AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> handleLoss(change)
             AudioManager.AUDIOFOCUS_GAIN -> {
                 hasFocus = true
+                suppressedLoss = 0 // focus is back: a latched loss is now stale (see [suppressLosses])
                 // Resume without re-requesting: focus was just handed back to us.
                 resumeLocalPlayback(reclaimFocus = false, reason = "focus gain")
             }
             // AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK: keep playing at full volume (see class doc).
+        }
+    }
+
+    private fun handleLoss(change: Int) {
+        if (!hasFocus) return
+        hasFocus = false
+        pausedByFocusLoss = true
+        onPause()
+        if (change == AudioManager.AUDIOFOCUS_LOSS) {
+            // Permanent loss: another app took over and Android won't redistribute focus back.
+            // Arm the quiet-watcher to reclaim once it goes silent.
+            armQuietWatcher()
+            Log.d(TAG, "focus lost (permanent) -> local paused, quiet-watcher armed")
+        } else {
+            // Transient loss (call, nav prompt): stop, but DON'T arm the watcher - it only sees
+            // media-type players, and a cellular call's audio has no app-side player, so it would
+            // read the call as quiet and blast audio into it. GAIN is reliably delivered when the
+            // transient owner finishes.
+            Log.d(TAG, "focus lost (transient) -> local paused, awaiting GAIN")
         }
     }
 
@@ -129,6 +175,8 @@ class AudioFocusController(
             )
         }
         hasFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        // Granted now: any loss latched during calibration is stale (see [suppressLosses]).
+        if (hasFocus) suppressedLoss = 0
         Log.d(TAG, "requestAudioFocus -> result=$result granted=$hasFocus")
         return hasFocus
     }
@@ -145,6 +193,7 @@ class AudioFocusController(
     fun abandon() {
         cancelQuietWatcher()
         pausedByFocusLoss = false
+        suppressedLoss = 0
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && request != null) {
             audioManager.abandonAudioFocusRequest(request)
         } else {
@@ -170,20 +219,77 @@ class AudioFocusController(
     private val quietWatcher = object : Runnable {
         override fun run() {
             if (!pausedByFocusLoss) return
-            if (audioManager.isMusicActive) {
+            // A ringing or active call (cellular or VoIP in communication mode) has no app-side
+            // player in the playback list, so foreignMediaActive() alone reads it as quiet.
+            if (foreignMediaActive() || audioManager.mode != AudioManager.MODE_NORMAL) {
                 quietSince = 0L
             } else {
                 val now = System.currentTimeMillis()
                 when {
                     quietSince == 0L -> quietSince = now
                     now - quietSince >= QUIET_RESUME_MS -> {
-                        resumeLocalPlayback(reclaimFocus = true, reason = "other player quiet")
-                        return
+                        // Opportunistic: only resume with a grant. The system refuses focus during
+                        // a call or ring, and playing without it would put the speaker on top of
+                        // the call with nothing to pause it again. refocus() (an explicit user act)
+                        // still plays regardless; this background path never does.
+                        if (request()) {
+                            resumeLocalPlayback(reclaimFocus = false, reason = "other player quiet")
+                            return
+                        }
+                        quietSince = 0L
                     }
                 }
             }
             mainHandler.postDelayed(this, WATCH_POLL_MS)
         }
+    }
+
+    /**
+     * True while some OTHER app is producing media on this device.
+     *
+     * NOT [AudioManager.isMusicActive], which was the original gate and could never go false on a
+     * broadcasting device. That is a global "is the music stream active" question, and a
+     * broadcaster is permanently part of the answer: its ExoPlayer holds a started USAGE_MEDIA
+     * AudioTrack at volume 0 for the whole session, because the FIFO tee is pre-volume and the
+     * AudioTrack's backpressure is what paces the engine, so the track can be neither muted away
+     * nor removed. The watcher therefore reset its timer on this app's own silence and only ever
+     * resumed when the BROADCAST stopped - the exact opposite of what it is for. Rig, 2026-09-05:
+     * a local snapclient stayed dead for 1h50m with nothing else playing.
+     *
+     * [AudioManager.getActivePlaybackConfigurations] answers the question we actually have, on
+     * API 34+. Measured on the rig the same day, with Spotify holding focus:
+     *
+     *   Spotify playing  ->  isMusicActive=true   activeConfigs=1 [usage=1 content=2 flags=0]
+     *   Spotify paused   ->  isMusicActive=true   activeConfigs=0 []
+     *
+     * Two things that measurement settles, neither of which was safe to assume. This app's own
+     * volume-0 track does NOT appear in the list, so there is nothing to filter out - and there is
+     * no way to filter it anyway, since the public surface of AudioPlaybackConfiguration is only
+     * [android.media.AudioPlaybackConfiguration.getAudioAttributes], with no uid and no player
+     * state. And a foreign app IS still recognisable through that keyhole: Spotify came back as
+     * usage=USAGE_MEDIA / CONTENT_TYPE_MUSIC, only its flags sanitized, so filtering on usage does
+     * not silently miss it and let us grab the speaker back mid-song.
+     *
+     * The first of those is an Android 14 behaviour, not a general one, hence the API 34 gate.
+     * The public list is the system's list passed through PlaybackActivityMonitor's
+     * anonymizeForPublicConsumption, which keeps only configs whose isActive() is true. Before
+     * Android 14 isActive() was true for ANY started player, volume 0 included; from Android 14 it
+     * is `!isMuteAffectingActiveState()`, which excludes a player muted by its own client volume
+     * (MUTED_BY_CLIENT_VOLUME). So on API 26-33 this app's own track IS in the list, looks exactly
+     * like Spotify through the attributes-only keyhole, and the list says "true" forever just as
+     * isMusicActive does.
+     *
+     * Below API 34 this therefore stays on [AudioManager.isMusicActive], and with it the old
+     * behaviour and its flaw: the watcher never sees quiet while broadcasting, and recovery from a
+     * permanent loss is [refocus] alone. That is also all a future regression of the API 34
+     * filtering can cost - true forever, recovery by [refocus] - the pre-fix behaviour, not
+     * something worse.
+     */
+    private fun foreignMediaActive(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return audioManager.isMusicActive
+        val configs = runCatching { audioManager.activePlaybackConfigurations }.getOrNull()
+            ?: return audioManager.isMusicActive
+        return configs.any { it.audioAttributes.usage in CONTENT_USAGES }
     }
 
     private fun armQuietWatcher() {
@@ -202,5 +308,22 @@ class AudioFocusController(
 
         /** Resume once the other player has been silent this long after a permanent loss. */
         private const val QUIET_RESUME_MS = 3_000L
+
+        /** Usages that mean "somebody is listening to something" and so should hold the speaker.
+         *  Short sonification and notification pings are deliberately absent: a message ping must
+         *  not keep postponing the resume. USAGE_VOICE_COMMUNICATION is present so a VoIP app
+         *  holding permanent focus for a call is not read as quiet and talked over; ALARM and
+         *  NOTIFICATION_RINGTONE because they are long-running sounds a user must hear, not pings.
+         *  USAGE_UNKNOWN is included because it is what an anonymized or attribute-less player
+         *  reports, and missing a real one costs more than a short delay. */
+        private val CONTENT_USAGES = setOf(
+            AudioAttributes.USAGE_MEDIA,
+            AudioAttributes.USAGE_GAME,
+            AudioAttributes.USAGE_ASSISTANT,
+            AudioAttributes.USAGE_VOICE_COMMUNICATION,
+            AudioAttributes.USAGE_ALARM,
+            AudioAttributes.USAGE_NOTIFICATION_RINGTONE,
+            AudioAttributes.USAGE_UNKNOWN,
+        )
     }
 }
