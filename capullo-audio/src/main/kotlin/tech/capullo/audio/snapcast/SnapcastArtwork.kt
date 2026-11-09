@@ -2,6 +2,8 @@ package tech.capullo.audio.snapcast
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.util.Base64
 import java.io.ByteArrayOutputStream
 
@@ -36,11 +38,24 @@ object SnapcastArtwork {
         } else {
             decoded
         }
+        // JPEG has no alpha and decoded bitmaps are premultiplied, so transparent pixels would encode
+        // as black. Flatten transparent art (station favicons often are) onto white first.
+        val opaque = if (bitmap.hasAlpha()) {
+            Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also { flat ->
+                Canvas(flat).apply {
+                    drawColor(Color.WHITE)
+                    drawBitmap(bitmap, 0f, 0f, null)
+                }
+                bitmap.recycle()
+            }
+        } else {
+            bitmap
+        }
         val jpeg = ByteArrayOutputStream().use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+            opaque.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
             out.toByteArray()
         }
-        bitmap.recycle()
+        opaque.recycle()
         return Base64.encodeToString(jpeg, Base64.NO_WRAP)
     }
 }
