@@ -53,12 +53,7 @@ class AudioFocusController(
     /** True while the local snapclient is stopped *because* focus was lost (not a user stop). */
     private var pausedByFocusLoss = false
 
-    @Volatile
-    private var suppressing: Boolean = false
-
-    /** The focus loss a suppression window swallowed, or 0. Replayed when suppression lifts, unless
-     *  a GAIN, a granted [request] or [abandon] clears it first (see [suppressLosses]). */
-    private var suppressedLoss: Int = 0
+    private val lossLatch = SuppressedLossLatch()
 
     /** While true, focus LOSSES are ignored entirely (no state transition, no onPause).
      *  Used during mic sync calibration: some OEMs (ColorOS) signal a focus loss when the
@@ -82,18 +77,14 @@ class AudioFocusController(
      *  If suppression is back on by the time the posted replay runs (back-to-back calibrations),
      *  the latch is left untouched and the next lift replays it. */
     var suppressLosses: Boolean
-        get() = suppressing
+        get() = lossLatch.suppressing
         set(value) {
-            val was = suppressing
-            suppressing = value
-            if (was && !value) mainHandler.post { replaySuppressedLoss() }
+            if (lossLatch.setSuppressing(value)) mainHandler.post { replaySuppressedLoss() }
         }
 
     private fun replaySuppressedLoss() {
-        // Re-suppressed before this ran: leave the latch for the next lift to replay.
-        if (suppressing) return
-        val change = suppressedLoss
-        suppressedLoss = 0
+        // 0 also when re-suppressed before this ran: the latch then waits for the next lift.
+        val change = lossLatch.takeReplay()
         if (change == 0) return
         Log.d(TAG, "replaying focus loss $change suppressed during calibration")
         handleLoss(change)
@@ -101,13 +92,10 @@ class AudioFocusController(
 
     private val listener = AudioManager.OnAudioFocusChangeListener { change ->
         Log.d(TAG, "onAudioFocusChange: $change (hasFocus=$hasFocus, suppressLosses=$suppressLosses)")
-        if (suppressLosses &&
-            (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT)
+        if ((change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) &&
+            lossLatch.offerLoss(change)
         ) {
-            // LATCHED, not dropped - see [suppressLosses]. A later loss overwrites an earlier one
-            // because only the most recent describes where focus actually stands; a GAIN, a granted
-            // request or abandon() clears it for the same reason.
-            suppressedLoss = change
+            // LATCHED, not dropped - see [suppressLosses] and SuppressedLossLatch.
             Log.d(TAG, "focus loss ignored (calibration in progress), latched for replay")
             return@OnAudioFocusChangeListener
         }
@@ -115,7 +103,7 @@ class AudioFocusController(
             AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> handleLoss(change)
             AudioManager.AUDIOFOCUS_GAIN -> {
                 hasFocus = true
-                suppressedLoss = 0 // focus is back: a latched loss is now stale (see [suppressLosses])
+                lossLatch.focusSettled() // focus is back: a latched loss is now stale
                 // Resume without re-requesting: focus was just handed back to us.
                 resumeLocalPlayback(reclaimFocus = false, reason = "focus gain")
             }
@@ -176,7 +164,7 @@ class AudioFocusController(
         }
         hasFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
         // Granted now: any loss latched during calibration is stale (see [suppressLosses]).
-        if (hasFocus) suppressedLoss = 0
+        if (hasFocus) lossLatch.focusSettled()
         Log.d(TAG, "requestAudioFocus -> result=$result granted=$hasFocus")
         return hasFocus
     }
@@ -193,7 +181,7 @@ class AudioFocusController(
     fun abandon() {
         cancelQuietWatcher()
         pausedByFocusLoss = false
-        suppressedLoss = 0
+        lossLatch.focusSettled()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && request != null) {
             audioManager.abandonAudioFocusRequest(request)
         } else {
