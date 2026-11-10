@@ -23,8 +23,9 @@ class SnapserverProcess(
     streamName: String = DEFAULT_STREAM_NAME,
     /**
      * The TCP ports Snapserver binds. Default is the legacy fixed 1604/1605/1680; pass
-     * [SnapserverPorts.free] for OS-assigned ports so multiple capullo apps coexist on one device.
-     * Read back off [ports] to wire NSD / the listen-in URL / the local snapclient / control client.
+     * [SnapserverPorts.free] for a random consecutive stream/tcp/http block so multiple capullo apps
+     * coexist on one device. Read back off [ports] to wire NSD / the listen-in URL / the local
+     * snapclient / control client.
      */
     val ports: SnapserverPorts = SnapserverPorts.Fixed,
     /**
@@ -90,11 +91,13 @@ class SnapserverProcess(
         }
     }
 
-    // The stream port is OS-assigned (see [SnapserverPorts.free]) and appears nowhere on the HTTP /
+    // The stream port is random (see [SnapserverPorts.free]) and appears nowhere on the HTTP /
     // JSON-RPC surface - the web URL only exposes the HTTP port. A snapclient needs the raw-TCP stream
     // port, which a cross-network listener otherwise can't know. Publish the resolved ports as a tiny
-    // `listen.json` in the served doc_root (next to index.html), so a listener who knows only the HTTP
-    // port (from the web URL / QR) can GET `http://host:httpPort/listen.json` and learn the stream port.
+    // `listen.json` in the served doc_root (next to index.html). The ports are one consecutive
+    // stream/tcp/http block, so the HTTP port serving this file is the last of the block: a listener
+    // who knows ANY of the three (the HTTP port from the web URL / QR, or the stream port) finds it by
+    // probing typed..typed+2 ([SnapserverListenInfo.resolve]) and learns the rest.
     private fun writeListenInfo() {
         try {
             val webuiDir = File(context.filesDir, "webui").apply { mkdirs() }

@@ -18,7 +18,7 @@ data class DiscoveredSnapserver(
     val port: Int,
     /**
      * The broadcaster's HTTP port (web player + JSON-RPC/WebSocket control), read from the service's
-     * `http` TXT attribute. Needed for listen-in control when the broadcaster uses OS-assigned ports
+     * `http` TXT attribute. Needed for listen-in control when the broadcaster uses random ports
      * (the port isn't a fixed convention anymore). Falls back to the legacy fixed port when absent.
      */
     val httpPort: Int = SnapserverDiscoveryManager.HTTP_SERVICE_PORT,

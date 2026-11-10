@@ -27,7 +27,7 @@ class SnapserverNsdRegistrar(context: Context) {
         // The HTTP port (web player + JSON-RPC/WebSocket control) isn't the service port, so it rides
         // along as a `http` TXT attribute - put on both records so whichever a listener resolves
         // carries it. This lets a listener reach a broadcaster's control socket even when the ports
-        // are OS-assigned (no fixed-port convention).
+        // are random (no fixed-port convention).
         register(SnapserverDiscoveryManager.SERVICE_TYPE, streamPort, httpPort)
         register(SnapserverDiscoveryManager.STREAM_SERVICE_TYPE, tcpPort, httpPort)
         Log.d(TAG, "Snapserver NSD registered as '${SnapserverDiscoveryManager.SERVICE_NAME_PREFIX}$advertisedName'")
