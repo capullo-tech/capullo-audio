@@ -60,7 +60,7 @@ object SnapserverListenInfo {
      * unreachable or not a capullo broadcaster (e.g. a stock snapserver, or the port is actually a
      * stream / tcp port).
      */
-    private suspend fun fetch(host: String, httpPort: Int): SnapserverPorts? = withContext(Dispatchers.IO) {
+    suspend fun fetch(host: String, httpPort: Int): SnapserverPorts? = withContext(Dispatchers.IO) {
         var conn: HttpURLConnection? = null
         try {
             conn = (URL("http://$host:$httpPort/listen.json").openConnection() as HttpURLConnection).apply {
