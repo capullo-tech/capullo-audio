@@ -58,6 +58,12 @@ class SnapserverProcess(
         fun controlSocketName(context: Context): String =
             "$DEFAULT_CONTROL_SOCKET_NAME.${context.packageName}"
 
+        /**
+         * Snapserver's HTTP doc_root: the web player (`index.html`), `listen.json`, app-written
+         * files like Telecloud's `webcfg.json`, and the published art (`art/`, see [SnapcastArtwork]).
+         */
+        fun docRoot(context: Context): File = File(context.filesDir, "webui")
+
         private const val PIPE_NAME = "filifo"
         private const val CODEC = "codec=pcm"
         private const val PIPE_MODE = "mode=read"
@@ -79,7 +85,7 @@ class SnapserverProcess(
 
     private fun copyWebUiAsset() {
         try {
-            val webuiDir = File(context.filesDir, "webui").apply { mkdirs() }
+            val webuiDir = docRoot(context).apply { mkdirs() }
             context.assets.open("webui/index.html").use { input ->
                 File(webuiDir, "index.html").outputStream().use { output ->
                     input.copyTo(output)
@@ -97,7 +103,7 @@ class SnapserverProcess(
     // port (from the web URL / QR) can GET `http://host:httpPort/listen.json` and learn the stream port.
     private fun writeListenInfo() {
         try {
-            val webuiDir = File(context.filesDir, "webui").apply { mkdirs() }
+            val webuiDir = docRoot(context).apply { mkdirs() }
             File(webuiDir, "listen.json").writeText(
                 """{"streamPort":${ports.streamPort},"tcpPort":${ports.tcpPort},"httpPort":${ports.httpPort}}"""
             )
@@ -137,7 +143,7 @@ class SnapserverProcess(
 
     private fun getSnapserverConfPath(): String {
         val confFile = File(cacheDir, "snapserver.conf")
-        val webUiPath = File(context.filesDir, "webui").absolutePath
+        val webUiPath = docRoot(context).absolutePath
         try {
             // Always rewrite so doc_root stays current and server.json reset takes effect.
             // Ports come from `ports` (default fixed 1604/1605/1680; or free() so a capullo-audio
@@ -198,7 +204,7 @@ class SnapserverProcess(
                 "--config", confFile,
                 "--server.datadir=$cacheDir",
                 "--stream.source", "pipe://$pipeFilepath?$pipeArgs",
-                "--http.doc_root=${File(context.filesDir, "webui").absolutePath}",
+                "--http.doc_root=${docRoot(context).absolutePath}",
                 "--server.name=${android.os.Build.MODEL}",
             )
             .redirectErrorStream(true)

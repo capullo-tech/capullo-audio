@@ -28,9 +28,13 @@ Where this sits: see [Platform shape](https://github.com/capullo-tech/capullo-au
 
 ## ⚠️ Migration notes for consuming apps
 
-1. **Artwork moved to the app.** The old plugin downloaded artwork from a URL / read an art file
-   itself. The engine's `SnapcontrolPlugin` now emits `NowPlaying.artworkBase64` verbatim - the
-   **source/app is responsible for producing base64 artwork** (and may set `extras["artExtension"]`).
+1. **Artwork is published, not embedded.** Snapserver parses the now-playing JSON on the thread that
+   reads the audio pipe, so a full-size image in `artData` stalls the broadcast at every track change.
+   Hand the art bytes to `SnapcastArtwork.publish()`: it writes them into the snapserver doc_root
+   (served as `/art/<hash>.<ext>`) and returns that path plus a ≤96 px JPEG thumbnail. Put the path in
+   `extras["artUrl"]` and the thumbnail in `NowPlaying.artworkBase64`. `SnapcontrolMetadataMapper`
+   embeds `artworkBase64` as `artData` only up to `MAX_ART_DATA_CHARS` (16 KiB) and labels it from its
+   bytes; anything larger is dropped. Listen-in clients fetch the full image with `SnapcastRemoteArt`.
 2. **`SnapserverProcess.STREAM_NAME` is hardcoded `"name=QuantumCast"`** - parameterize per app
    before Telecloud consumes the engine.
 3. `CapulloAudioEngine` covers the broadcast core. Still to wire (see its KDoc): prefetch feedback
