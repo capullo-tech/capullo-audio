@@ -159,7 +159,10 @@ class LevelAtTest {
         val ratios = (0 until 8).map { seed ->
             val peaks = Dsp.findPeaks(
                 Dsp.gccPhat(program(n, seed), program(n, seed + 500)),
-                fs = 1000, loMs = 0, hiMs = 20_000, count = 4,
+                fs = 1000,
+                loMs = 0,
+                hiMs = 20_000,
+                count = 4,
             )
             peaks[1].z / peaks[0].z
         }

@@ -14,13 +14,17 @@ class CalibrationJournalTest {
 
     /** In-memory journal standing in for the host's file-backed one. */
     private class FakeJournal(var stored: Map<String, ClientSnapshot>? = null) : CalibrationJournal {
-        override fun save(originals: Map<String, ClientSnapshot>): Boolean { stored = originals; return true }
+        override fun save(originals: Map<String, ClientSnapshot>): Boolean {
+            stored = originals
+            return true
+        }
         override fun load(): Map<String, ClientSnapshot>? = stored
-        override fun clear() { stored = null }
+        override fun clear() {
+            stored = null
+        }
     }
 
-    private fun snap(latency: Int, percent: Int = 100, muted: Boolean = false) =
-        ClientSnapshot(latency, percent, muted)
+    private fun snap(latency: Int, percent: Int = 100, muted: Boolean = false) = ClientSnapshot(latency, percent, muted)
 
     @Test
     fun `recover restores the journaled latencies and volumes and clears the journal`() = runBlocking {

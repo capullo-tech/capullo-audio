@@ -50,29 +50,36 @@ class RigReplayTest {
         val probed = listOf(
             peaks(1375.1 to 20.5, 1403.1 to 16.2, 1391.1 to 15.7, 1408.3 to 15.3, 1446.8 to 13.9),
             peaks(
-                1381.3 to 17.0, 1374.9 to 15.2, 1402.1 to 15.0, 1369.3 to 14.9, 1397.3 to 14.5,
-                1412.8 to 13.7, 1392.8 to 11.1,
+                1381.3 to 17.0,
+                1374.9 to 15.2,
+                1402.1 to 15.0,
+                1369.3 to 14.9,
+                1397.3 to 14.5,
+                1412.8 to 13.7,
+                1392.8 to 11.1,
             ),
             peaks(1363.9 to 27.6, 1358.7 to 17.5, 1373.8 to 16.9, 1390.8 to 16.2, 1379.9 to 16.1, 1435.5 to 14.3),
         )
         val offsets = listOf(90, 470)
         val tol = 15.0
         say("=== attribution replay: failing run 08-10 20:04, offsets=$offsets tol=$tol ===")
-        for ((bi, b) in baselines.withIndex()) for ((pi, p) in probed.withIndex()) {
-            val a = PeakAttribution.attribute(b, p, offsets, tol)
-            val bl = PeakAttribution.clusterLeaders(b).map { it.lagMs }
-            val pl = PeakAttribution.clusterLeaders(p).map { it.lagMs }
-            say("base$bi x probe$pi  leadersB=$bl leadersP=$pl")
-            say(
-                "  ref=${a.matches[0]?.let { "%.1f->%.1f".format(it.baselineLagMs, it.probedLagMs) } ?: "NULL"}" +
-                    "  tgt=${a.matches[1]?.let { "%.1f->%.1f".format(it.baselineLagMs, it.probedLagMs) } ?: "NULL"}" +
-                    "  drift=%.1f ghosts=${a.ghostLagsMs.map { g -> "%.1f".format(g) }}".format(a.driftMs),
-            )
-            // Was there ANY (baseline, probed) pair within tol of the reference's +90 shift,
-            // at any plausible drift? Enumerate the raw shift errors so "no candidate" is a
-            // printed fact rather than an inference.
-            val refErrs = bl.flatMap { bb -> pl.map { pp -> pp - bb - offsets[0] } }
-            say("  ref-shift residuals (p-b-90): " + refErrs.joinToString { "%.1f".format(it) })
+        for ((bi, b) in baselines.withIndex()) {
+            for ((pi, p) in probed.withIndex()) {
+                val a = PeakAttribution.attribute(b, p, offsets, tol)
+                val bl = PeakAttribution.clusterLeaders(b).map { it.lagMs }
+                val pl = PeakAttribution.clusterLeaders(p).map { it.lagMs }
+                say("base$bi x probe$pi  leadersB=$bl leadersP=$pl")
+                say(
+                    "  ref=${a.matches[0]?.let { "%.1f->%.1f".format(it.baselineLagMs, it.probedLagMs) } ?: "NULL"}" +
+                        "  tgt=${a.matches[1]?.let { "%.1f->%.1f".format(it.baselineLagMs, it.probedLagMs) } ?: "NULL"}" +
+                        "  drift=%.1f ghosts=${a.ghostLagsMs.map { g -> "%.1f".format(g) }}".format(a.driftMs),
+                )
+                // Was there ANY (baseline, probed) pair within tol of the reference's +90 shift,
+                // at any plausible drift? Enumerate the raw shift errors so "no candidate" is a
+                // printed fact rather than an inference.
+                val refErrs = bl.flatMap { bb -> pl.map { pp -> pp - bb - offsets[0] } }
+                say("  ref-shift residuals (p-b-90): " + refErrs.joinToString { "%.1f".format(it) })
+            }
         }
         flush("replay-attribution-20260810.txt")
     }
@@ -86,8 +93,7 @@ class RigReplayTest {
         return out
     }
 
-    private fun rotate(r: DoubleArray, pre: Int, span: Int) =
-        DoubleArray(span) { j -> r[Math.floorMod(j - pre, r.size)] }
+    private fun rotate(r: DoubleArray, pre: Int, span: Int) = DoubleArray(span) { j -> r[Math.floorMod(j - pre, r.size)] }
 
     /**
      * The known-answer test for the targeted rescue floor, on real hardware captures: at each
@@ -173,7 +179,13 @@ class RigReplayTest {
                             guard,
                             count,
                             anchors.joinToString { "%.0f(%.1f)".format(it.lagMs, it.z) },
-                            if (onLoud && onQuiet) "BOTH SOURCES" else if (onLoud) "loud only" else "??",
+                            if (onLoud && onQuiet) {
+                                "BOTH SOURCES"
+                            } else if (onLoud) {
+                                "loud only"
+                            } else {
+                                "??"
+                            },
                         ),
                     )
                 }

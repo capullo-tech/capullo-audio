@@ -120,7 +120,10 @@ class SnapcontrolPlugin(
     @Volatile private var currentSession: SnapcontrolSession? = null
 
     @Volatile var isStreamLocked: Boolean = false
-        set(value) { field = value; notifyPropertiesChanged() }
+        set(value) {
+            field = value
+            notifyPropertiesChanged()
+        }
 
     fun start() {
         if (listener != null) return
@@ -135,8 +138,11 @@ class SnapcontrolPlugin(
     }
 
     fun stop() {
-        val srv = listener; listener = null
-        try { srv?.close() } catch (_: IOException) {}
+        val srv = listener
+        listener = null
+        try {
+            srv?.close()
+        } catch (_: IOException) {}
         currentSession?.close()
         currentSession = null
         pluginJob.cancel()
@@ -149,14 +155,18 @@ class SnapcontrolPlugin(
     private suspend fun acceptLoop() {
         val srv = listener ?: return
         while (scope.isActive) {
-            val sock = try { srv.accept() } catch (e: IOException) {
+            val sock = try {
+                srv.accept()
+            } catch (e: IOException) {
                 Log.d(TAG, "Accept loop ending: ${e.message}")
                 return
             }
             Log.d(TAG, "New session")
             val session = SnapcontrolSession(sock, state, controller, mapper, scope, { isStreamLocked })
             currentSession = session
-            try { session.run() } finally {
+            try {
+                session.run()
+            } finally {
                 currentSession = null
                 Log.d(TAG, "Session ended")
             }
@@ -188,13 +198,17 @@ private class SnapcontrolSession(
         } finally {
             outbox.close()
             writerJob.cancel()
-            try { socket.close() } catch (_: IOException) {}
+            try {
+                socket.close()
+            } catch (_: IOException) {}
             sessionJob.cancel()
         }
     }
 
     fun close() {
-        try { socket.close() } catch (_: IOException) {}
+        try {
+            socket.close()
+        } catch (_: IOException) {}
         outbox.close()
         sessionJob.cancel()
     }
@@ -261,8 +275,11 @@ private class SnapcontrolSession(
     private suspend fun readerLoop() {
         val reader = BufferedReader(InputStreamReader(socket.inputStream, Charsets.UTF_8))
         while (scope.isActive) {
-            val line = try { reader.readLine() ?: return } catch (e: IOException) {
-                Log.d(TAG, "Reader end: ${e.message}"); return
+            val line = try {
+                reader.readLine() ?: return
+            } catch (e: IOException) {
+                Log.d(TAG, "Reader end: ${e.message}")
+                return
             }
             if (line.isBlank()) continue
             handleLine(line)
@@ -283,8 +300,11 @@ private class SnapcontrolSession(
     }
 
     private fun handleLine(line: String) {
-        val req = try { JSONObject(line) } catch (e: JSONException) {
-            Log.w(TAG, "JSON parse error: ${e.message}"); return
+        val req = try {
+            JSONObject(line)
+        } catch (e: JSONException) {
+            Log.w(TAG, "JSON parse error: ${e.message}")
+            return
         }
         val id: Any? = if (req.has("id") && !req.isNull("id")) req.get("id") else null
         val method = req.optString("method", "")
@@ -315,7 +335,10 @@ private class SnapcontrolSession(
                     "ok"
                 }
                 "Plugin.Stream.Player.SetProperty" -> "ok"
-                else -> { if (id != null) sendError(id, -32601, "Method not found: $method"); return }
+                else -> {
+                    if (id != null) sendError(id, -32601, "Method not found: $method")
+                    return
+                }
             }
             if (id != null) sendResult(id, result)
         } catch (e: Throwable) {

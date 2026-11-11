@@ -35,7 +35,9 @@ class SnapserverNsdRegistrar(context: Context) {
 
     fun stop() {
         listeners.forEach {
-            try { nsdManager.unregisterService(it) } catch (_: Exception) {}
+            try {
+                nsdManager.unregisterService(it)
+            } catch (_: Exception) {}
         }
         listeners.clear()
         Log.d(TAG, "Snapserver NSD unregistered")

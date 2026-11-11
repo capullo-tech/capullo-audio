@@ -48,7 +48,8 @@ public class CapulloAudioEngine(
         // Per-app abstract control-socket name (avoids the device-global "snapcontrol" collision when
         // two capullo apps broadcast at once). Feed the SAME value into the plugin below.
         val server = SnapserverProcess(
-            context, streamName,
+            context,
+            streamName,
             controlSocketName = SnapserverProcess.controlSocketName(context),
         ).also { snapserver = it }
         scope.launch { server.start() }
@@ -61,7 +62,9 @@ public class CapulloAudioEngine(
         // The plugin reads the OVERLAID flow (source metadata + the engine's real clock), both in its
         // constructor and on every GetProperties - so both wiring points must be the overlaid flow.
         val p = SnapcontrolPlugin(
-            playbackLoop.nowPlaying, controller, parentJob,
+            playbackLoop.nowPlaying,
+            controller,
+            parentJob,
             socketName = server.controlSocketName,
         ).also { plugin = it }
         p.start()
@@ -85,9 +88,11 @@ public class CapulloAudioEngine(
     }
 
     public fun stop() {
-        playback?.release(); playback = null
+        playback?.release()
+        playback = null
         loop = null
-        plugin?.stop(); plugin = null
+        plugin?.stop()
+        plugin = null
         snapserver = null // process teardown handled by its own lifecycle
     }
 }

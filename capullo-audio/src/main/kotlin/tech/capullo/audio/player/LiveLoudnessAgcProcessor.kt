@@ -75,7 +75,10 @@ class LiveLoudnessAgcProcessor(
         var y2 = 0.0
 
         fun reset() {
-            x1 = 0.0; x2 = 0.0; y1 = 0.0; y2 = 0.0
+            x1 = 0.0
+            x2 = 0.0
+            y1 = 0.0
+            y2 = 0.0
         }
     }
     private val stage1 = arrayOf(BiquadState(), BiquadState())
@@ -134,8 +137,7 @@ class LiveLoudnessAgcProcessor(
         return yi
     }
 
-    private fun kWeight(channel: Int, x: Double): Double =
-        biquadStep(stage2[channel], highPass, biquadStep(stage1[channel], shelf, x))
+    private fun kWeight(channel: Int, x: Double): Double = biquadStep(stage2[channel], highPass, biquadStep(stage1[channel], shelf, x))
 
     override fun queueInput(inputBuffer: ByteBuffer) {
         if (!inputBuffer.hasRemaining()) return
@@ -196,7 +198,10 @@ class LiveLoudnessAgcProcessor(
         var count = 0
         for (i in 0 until rollingFilled) {
             val p = rollingPower[i]
-            if (p > absoluteThreshold) { sum += p; count++ }
+            if (p > absoluteThreshold) {
+                sum += p
+                count++
+            }
         }
         if (count == 0) return // whole window is near-silent - hold the last gain, don't chase it
         val ungatedMean = sum / count
@@ -210,7 +215,10 @@ class LiveLoudnessAgcProcessor(
         var windowPeak = 0
         for (i in 0 until rollingFilled) {
             val p = rollingPower[i]
-            if (p > relativeThreshold) { sum2 += p; count2++ }
+            if (p > relativeThreshold) {
+                sum2 += p
+                count2++
+            }
             if (rollingPeak[i] > windowPeak) windowPeak = rollingPeak[i]
         }
         val finalMean = if (count2 > 0) sum2 / count2 else ungatedMean

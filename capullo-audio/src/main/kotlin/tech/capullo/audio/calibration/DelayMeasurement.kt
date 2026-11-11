@@ -40,8 +40,7 @@ object DelayMeasurement {
 
         /** Strongest whitened-correlation sample within ±[tolMs] of [lagMs], z-scored against this
          *  capture's own floor; null when the timing array wasn't kept. */
-        fun timingPeakNear(lagMs: Double, tolMs: Double): Dsp.Peak? =
-            Dsp.peakNear(timingCorrelation, fs, lagMs, tolMs)
+        fun timingPeakNear(lagMs: Double, tolMs: Double): Dsp.Peak? = Dsp.peakNear(timingCorrelation, fs, lagMs, tolMs)
     }
 
     /** Peaks only — the sync path's view. */

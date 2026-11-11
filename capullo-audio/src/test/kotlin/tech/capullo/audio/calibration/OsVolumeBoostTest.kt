@@ -15,7 +15,9 @@ class OsVolumeBoostTest {
 
     private class FakeDevice(override val maxIndex: Int = 15, var index: Int = 6) : DeviceVolume {
         override fun current() = index
-        override fun set(index: Int) { this.index = index }
+        override fun set(index: Int) {
+            this.index = index
+        }
     }
 
     private class FakeJournal(var stored: Int? = null, private val saveOk: Boolean = true) : OsVolumeJournal {
@@ -24,7 +26,9 @@ class OsVolumeBoostTest {
             return saveOk
         }
         override fun load(): Int? = stored
-        override fun clear() { stored = null }
+        override fun clear() {
+            stored = null
+        }
     }
 
     @Test
