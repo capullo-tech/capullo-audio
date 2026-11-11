@@ -21,6 +21,7 @@ object SnapserverListenInfo {
 
     private val TAG = SnapserverListenInfo::class.java.simpleName
     private const val TIMEOUT_MS = 4000
+    private const val READ_TIMEOUT_MS = 1500
     private const val MAX_PORT = 65535
 
     /**
@@ -65,7 +66,9 @@ object SnapserverListenInfo {
         try {
             conn = (URL("http://$host:$httpPort/listen.json").openConnection() as HttpURLConnection).apply {
                 connectTimeout = TIMEOUT_MS
-                readTimeout = TIMEOUT_MS
+                // Short: listen.json answers in milliseconds, and a probe that lands on the stream
+                // socket (typed stream port) can accept and stay silent; don't wait 4 s on it.
+                readTimeout = READ_TIMEOUT_MS
                 requestMethod = "GET"
             }
             if (conn.responseCode != HttpURLConnection.HTTP_OK) return@withContext null
