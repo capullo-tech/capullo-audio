@@ -82,6 +82,8 @@ class SnapcastArtwork(context: Context) {
                 // Power-of-two subsampling while decoding (bounded memory even for multi-MB art) down
                 // to under 2x the target, then a filtered scale; BitmapUtil also applies the EXIF
                 // rotation, which BitmapFactory ignores.
+                // (media3 1.9.0: the 4th argument is maximumOutputDimension, the LONGEST output
+                // side - not a total-pixel budget.)
                 val src = BitmapUtil.decode(bytes, bytes.size, null, THUMBNAIL_PX * 2).also { decoded = it }
                 val scale = minOf(1f, THUMBNAIL_PX.toFloat() / maxOf(src.width, src.height))
                 val w = Math.round(src.width * scale).coerceAtLeast(1)
