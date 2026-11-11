@@ -46,6 +46,14 @@ private const val NOTIFY_READY = """{"jsonrpc":"2.0","method":"Plugin.Stream.Rea
 /**
  * How a [NowPlaying] maps onto the Snapcast web-player metadata JSON. Defaults reproduce
  * QuantumCast's radio schema (album → "station"); an app can override the album key.
+ *
+ * ART: snapserver parses this JSON on the thread that reads the audio pipe, so a large embedded image
+ * stalls the broadcast at every track change (OnePlus 3: 150-290 ms of `onResync` with full-size art).
+ * Full-size art therefore travels as `artUrl` (a file served by this snapserver, see
+ * [SnapcastArtwork]), and [NowPlaying.artworkBase64] may only be a small fallback thumbnail: the mapper
+ * embeds it as `artData` only up to [MAX_ART_DATA_CHARS] and only when its bytes are a recognised
+ * image ([embeddedArt]). Anything bigger is dropped here, not shrunk - decoding a large image has no
+ * place on the serialization path - so no app can bring the stall back by handing over full-size art.
  */
 class SnapcontrolMetadataMapper(
     private val albumKey: String = "station",
@@ -54,21 +62,40 @@ class SnapcontrolMetadataMapper(
 
     fun metadata(np: NowPlaying): JSONObject? {
         val hasCore = np.title.isNotEmpty() || np.artist.isNotEmpty() || np.album.isNotEmpty()
-        if (!hasCore && np.extras.isEmpty() && np.artworkBase64 == null) return null
+        val art = embeddedArt(np.artworkBase64)
+        if (!hasCore && np.extras.isEmpty() && art == null) return null
         val meta = JSONObject()
         if (np.title.isNotEmpty()) meta.put("title", np.title)
         if (np.artist.isNotEmpty()) meta.put("artist", JSONArray().put(np.artist))
         if (np.album.isNotEmpty()) meta.put(albumKey, np.album)
         np.streamUrl?.takeIf { it.isNotEmpty() }?.let { meta.put("url", it) }
-        // App-specific fields verbatim (country, countrycode, codec, bitrate, youtubeUrl, …).
-        for ((k, v) in np.extras) if (v.isNotEmpty()) meta.put(k, v)
-        np.artworkBase64?.takeIf { it.isNotEmpty() }?.let {
-            meta.put(
-                "artData",
-                JSONObject().put("data", it).put("extension", np.extras["artExtension"] ?: "jpg"),
-            )
-        }
+        // App-specific fields verbatim (country, countrycode, codec, bitrate, youtubeUrl, artUrl, …).
+        // Except `artData`: that key belongs to the capped embed below.
+        for ((k, v) in np.extras) if (v.isNotEmpty() && k != "artData") meta.put(k, v)
+        art?.let { meta.put("artData", JSONObject().put("data", it.data).put("extension", it.extension)) }
         return meta
+    }
+
+    companion object {
+        /**
+         * Largest `artData` payload embedded, in base64 characters (~12 KB of image). A
+         * [SnapcastArtwork] thumbnail is a few KB; this leaves room without letting a real image through.
+         */
+        const val MAX_ART_DATA_CHARS = 16 * 1024
+
+        /**
+         * The `artData` to embed for [base64], or null: none given, over [MAX_ART_DATA_CHARS], or not a
+         * JPEG/PNG/WebP/GIF. The extension is read from the bytes, never taken from the caller.
+         */
+        fun embeddedArt(base64: String?): ArtData? {
+            if (base64.isNullOrEmpty()) return null
+            if (base64.length > MAX_ART_DATA_CHARS) {
+                Log.w(TAG, "artData of ${base64.length} chars over the $MAX_ART_DATA_CHARS cap - not embedded; publish full art via SnapcastArtwork")
+                return null
+            }
+            val format = ArtFormat.sniffBase64(base64) ?: return null
+            return ArtData(base64, format.extension)
+        }
     }
 }
 
@@ -183,11 +210,11 @@ private class SnapcontrolSession(
     }
 
     // Metadata serialization cache. notifyProperties() fires on every transport flip and
-    // handleLine() answers every snapserver GetProperties poll - both re-emit the full properties,
-    // whose `metadata` block embeds the album art as a ~300KB Base64 blob. org.json escapes that
-    // blob char-by-char on each toString(); doing it per call pegs a core and starves the real-time
-    // FIFO writer (→ underruns → resync storm → stutter). The art only changes per track, so we
-    // serialize the metadata block once and reuse the string until an art-affecting field moves.
+    // handleLine() answers every snapserver GetProperties poll - both re-emit the full properties.
+    // The metadata block used to embed full-size art (a ~300KB base64 blob that org.json escapes
+    // char-by-char, pegging a core and starving the real-time FIFO writer). The mapper now caps the
+    // embed at a thumbnail, but the block still only changes per track, so it is serialized once and
+    // reused until a field it reads moves (which also keeps an over-cap warning to once per track).
     private val metaCacheLock = Any()
     private var metaCachePrimed = false
     private var cachedMetaFields: String? = null
@@ -226,7 +253,7 @@ private class SnapcontrolSession(
         val base = obj.toString()
         val meta = metadataJson(np) ?: return base
         // Splice the pre-serialized metadata fragment in verbatim rather than putting the JSONObject
-        // on `obj`: a top-level toString() would re-escape the whole art blob. `base` is a non-empty
+        // on `obj`: a top-level toString() would re-escape the whole block. `base` is a non-empty
         // object, so it ends in '}'.
         return base.substring(0, base.length - 1) + ",\"metadata\":" + meta + "}"
     }
@@ -267,7 +294,7 @@ private class SnapcontrolSession(
             val result: Any = when (method) {
                 "Plugin.Stream.Player.GetProperties" -> {
                     // Splice the pre-serialized properties in verbatim; routing the JSONObject
-                    // through sendResult() would re-escape the ~300KB art blob on every poll.
+                    // through sendResult() would re-escape the metadata block on every poll.
                     if (id != null) sendRawResult(id, propertiesString())
                     return
                 }

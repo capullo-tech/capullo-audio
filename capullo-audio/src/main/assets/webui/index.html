@@ -1350,10 +1350,10 @@ function setMetaRowText(el, text) {
 }
 
 // ── Now Playing ───────────────────────────────────────────────────────────────
-// Pick the image MIME from the base64 magic bytes. The app derives artData.extension
-// from the art URL, which is often garbage for radio favicons (dots in an IP, no
-// extension) → an invalid `data:image/<garbage>` MIME and a broken image. Sniff the
-// bytes instead; fall back to a sane extension only if it's a plausible token.
+// Pick the image MIME from the base64 magic bytes rather than trusting artData.extension
+// (older broadcasters derived it from the art URL, often garbage for radio favicons: dots in
+// an IP, no extension → an invalid `data:image/<garbage>` MIME and a broken image). Fall back
+// to the extension only if it's a plausible token.
 function artMime(b64, ext) {
   try {
     const b = atob(b64.slice(0, 24));
@@ -1370,29 +1370,45 @@ function artMime(b64, ext) {
 
 function renderMeta() {
   const m = S.meta, art = $('art'), ph = $('art-ph');
-  // Resolve the desired art source (embedded data wins over a URL).
+  // Art: artUrl first. The broadcaster serves the full-size image from this snapserver
+  // (artUrl "/art/<hash>.<ext>", resolved against this page's origin, so it works through the
+  // public tunnel too). artData is only a <=96 px thumbnail (full-size art embedded in the
+  // metadata stalls snapserver), so it is the fallback: when there is no artUrl, or it fails to load.
+  const embedded = (m.artData && m.artData.data)
+    ? 'data:' + artMime(m.artData.data, m.artData.extension) + ';base64,' + m.artData.data : '';
   let src = '';
-  if (m.artData && m.artData.data) {
-    src = 'data:' + artMime(m.artData.data, m.artData.extension) + ';base64,' + m.artData.data;
-  } else if (m.artUrl) {
-    src = m.artUrl;
-  }
-  S.artSrc = src;  // reused by the OS MediaSession (lockscreen artwork)
+  if (m.artUrl) { try { src = new URL(m.artUrl, location.href).href; } catch (_) {} }
+  const fallback = src ? embedded : '';
+  if (!src) src = embedded;
   // Keep the ♪ placeholder visible UNTIL the image actually loads, and restore
   // it on error - so a missing/slow/broken favicon never flashes a broken-image
-  // glitch or a blank square. Only (re)assign src when it changes to avoid
-  // reloading the image (and flickering) on every metadata update.
+  // glitch or a blank square. Only (re)assign src when the wanted art changes, to
+  // avoid reloading the image (and flickering) on every metadata update - and to
+  // not retry a failed artUrl over its fallback.
   if (src) {
-    if (art.getAttribute('src') !== src) {
+    if (art.dataset.want !== src) {
+      art.dataset.want = src;
       art.onload  = () => { art.hidden = false; ph.classList.add('art-loaded'); };
-      art.onerror = () => { art.hidden = true; art.removeAttribute('src'); ph.classList.remove('art-loaded'); };
+      art.onerror = () => {
+        if (fallback && art.getAttribute('src') !== fallback) {
+          art.setAttribute('src', fallback);
+          S.artSrc = fallback;
+          syncMediaSession();
+          return;
+        }
+        art.hidden = true; art.removeAttribute('src'); ph.classList.remove('art-loaded');
+        S.artSrc = '';
+      };
       art.setAttribute('src', src);
     }
   } else {
     art.onload = art.onerror = null;
+    delete art.dataset.want;
     art.hidden = true; art.removeAttribute('src');
     ph.classList.remove('art-loaded');
   }
+  // What is actually shown (after any fallback); reused by the OS MediaSession (lockscreen artwork).
+  S.artSrc = art.getAttribute('src') || '';
 
   const artist = Array.isArray(m.artist) ? (m.artist[0] || '') : (m.artist || '');
   const title = m.title || m.station || '-';
