@@ -282,7 +282,8 @@ class FifoRenderersFactory(
             .setEnableFloatOutput(false)  // keep the chain in 16-bit PCM
             .setAudioProcessorChain(
                 DefaultAudioSink.DefaultAudioProcessorChain(
-                    mixer, resampler, TeeAudioProcessor(fifoSink),
+                    // HiResDecimator: anti-alias low-pass for >48k input; Sonic has none.
+                    mixer, HiResDecimator(), resampler, TeeAudioProcessor(fifoSink),
                 )
             )
             .build()
