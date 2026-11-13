@@ -6,7 +6,6 @@ import android.system.OsConstants
 import android.util.Log
 import androidx.media3.common.audio.ChannelMixingAudioProcessor
 import androidx.media3.common.audio.ChannelMixingMatrix
-import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.audio.AudioSink
@@ -277,7 +276,8 @@ class FifoRenderersFactory(
             putChannelMixingMatrix(ChannelMixingMatrix.create(2, 2))
         }
         // LOCKSTEP with SnapserverProcess.SAMPLE_FORMAT (48000) - the FIFO is read at that rate.
-        val resampler = SonicAudioProcessor().apply { setOutputSampleRateHz(48000) }
+        // FixedRateResampler, not a bare SonicAudioProcessor: the latter forgets its target on reset.
+        val resampler = FixedRateResampler(48000)
         return DefaultAudioSink.Builder(context)
             .setEnableFloatOutput(false)  // keep the chain in 16-bit PCM
             .setAudioProcessorChain(
