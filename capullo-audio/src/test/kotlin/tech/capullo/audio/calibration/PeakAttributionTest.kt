@@ -32,12 +32,16 @@ class PeakAttributionTest {
         // static reflection that moves with it. The direct paths (higher z) must win, and
         // matches[0] must be the reference identified by its own +60 move.
         val baseline = listOf(
-            peak(1200.0, 50.0), peak(1214.0, 12.0), // reference + reflection
-            peak(1230.0, 40.0), peak(1244.0, 10.0), // target + reflection
+            peak(1200.0, 50.0),
+            peak(1214.0, 12.0), // reference + reflection
+            peak(1230.0, 40.0),
+            peak(1244.0, 10.0), // target + reflection
         )
         val probed = listOf(
-            peak(1260.0, 50.0), peak(1274.0, 12.0), // reference moved +60
-            peak(1320.0, 40.0), peak(1334.0, 10.0), // target moved +90
+            peak(1260.0, 50.0),
+            peak(1274.0, 12.0), // reference moved +60
+            peak(1320.0, 40.0),
+            peak(1334.0, 10.0), // target moved +90
         )
         val res = PeakAttribution.attribute(baseline, probed, listOf(60, 90), matchTolMs = 15.0)
         assertEquals(1200.0, res.matches[0]!!.baselineLagMs, 0.0)
@@ -77,7 +81,9 @@ class PeakAttributionTest {
         // modal drift is removed and all entities attribute; drift is reported.
         val baseline = listOf(peak(1200.0, 50.0), peak(1230.0, 40.0), peak(1310.0, 30.0))
         val probed = listOf( // each = baseline + offset(60/90/150) + 120 drift
-            peak(1380.0, 50.0), peak(1440.0, 40.0), peak(1580.0, 30.0),
+            peak(1380.0, 50.0),
+            peak(1440.0, 40.0),
+            peak(1580.0, 30.0),
         )
         val res = PeakAttribution.attribute(baseline, probed, listOf(60, 90, 150), matchTolMs = 15.0)
         assertEquals(120.0, res.driftMs, 2.0)
@@ -139,7 +145,9 @@ class PeakAttributionTest {
         // Entire scene 200 ms later than the probed capture (drift). Absolute-lag
         // anchoring would fail; offset-consensus must not.
         val verify = listOf(
-            peak(1400.0, 30.0), peak(1440.0, 22.0), peak(1490.0, 18.0),
+            peak(1400.0, 30.0),
+            peak(1440.0, 22.0),
+            peak(1490.0, 18.0),
         )
         val conf = PeakAttribution.confirmTracking(verify, mapOf(0 to 40, 1 to 90), matchTolMs = 15.0)
         assertEquals(1400.0, conf.referenceLagMs!!, 0.0)
@@ -152,7 +160,9 @@ class PeakAttributionTest {
         // mis-attributed so there's nothing at ref+150. It must be absent from tracked so
         // the caller restores it, while the other two still commit.
         val verify = listOf(
-            peak(1200.0, 30.0), peak(1240.0, 22.0), peak(1290.0, 18.0),
+            peak(1200.0, 30.0),
+            peak(1240.0, 22.0),
+            peak(1290.0, 18.0),
             peak(1415.0, 17.0), // stray, not at ref+150 (1350)
         )
         val conf = PeakAttribution.confirmTracking(verify, mapOf(0 to 40, 1 to 90, 2 to 150), matchTolMs = 15.0)
@@ -177,10 +187,15 @@ class PeakAttributionTest {
         // of BOTH ref+40 and ref+60. It must not be counted for either slot. A third
         // target at ref+150 keeps a clean candidate reference present.
         val verify = listOf(
-            peak(1200.0, 30.0), peak(1250.0, 22.0), peak(1350.0, 20.0),
+            peak(1200.0, 30.0),
+            peak(1250.0, 22.0),
+            peak(1350.0, 20.0),
         )
         val conf = PeakAttribution.confirmTracking(
-            verify, mapOf(0 to 40, 1 to 60, 2 to 150), matchTolMs = 15.0, minHits = 1,
+            verify,
+            mapOf(0 to 40, 1 to 60, 2 to 150),
+            matchTolMs = 15.0,
+            minHits = 1,
         )
         assertTrue("ambiguous slot 0 not tracked", 0 !in conf.tracked)
         assertTrue("ambiguous slot 1 not tracked", 1 !in conf.tracked)
@@ -193,7 +208,10 @@ class PeakAttributionTest {
         // With verify probes applied they should be at ref+offset; if instead every peak
         // clusters at ~ref (nothing at ref+offset), no target may be reported tracked.
         val verify = listOf(
-            peak(1200.0, 30.0), peak(1204.0, 24.0), peak(1197.0, 20.0), peak(1208.0, 18.0),
+            peak(1200.0, 30.0),
+            peak(1204.0, 24.0),
+            peak(1197.0, 20.0),
+            peak(1208.0, 18.0),
         )
         val conf = PeakAttribution.confirmTracking(verify, mapOf(0 to 40, 1 to 90), matchTolMs = 15.0)
         assertTrue("no target should track when nothing sits at ref+offset", conf.tracked.isEmpty())
@@ -356,7 +374,13 @@ class PeakAttributionTest {
         // Salient probed list holds ONLY the reference (vBase leader 1307.1 + 90, drift +11.7).
         val probed = listOf(peak(1408.8, 9.1))
         val pair = PeakAttribution.assignVerifyPairWithWindows(
-            probed, vBase, vBase, 90, 470, 15.0, 6.0,
+            probed,
+            vBase,
+            vBase,
+            90,
+            470,
+            15.0,
+            6.0,
         ) { center, tol ->
             // The real target arrival at 1792.8 (z 8.9) answers windows near it; empty windows
             // answer the correlation floor.
@@ -372,7 +396,13 @@ class PeakAttributionTest {
         // Mirror of 21:32: only the target is salient (vBase leader 1294.2 + 470, drift ~0).
         val probed = listOf(peak(1764.5, 12.2))
         val pair = PeakAttribution.assignVerifyPairWithWindows(
-            probed, vBase, vBase, 90, 470, 15.0, 6.0,
+            probed,
+            vBase,
+            vBase,
+            90,
+            470,
+            15.0,
+            6.0,
         ) { center, tol ->
             if (abs(center - 1397.3) <= tol) peak(1397.3, 7.2) else peak(center, 4.0)
         }
@@ -385,7 +415,13 @@ class PeakAttributionTest {
     fun `verify fallback refuses a missing side whose windows hold only noise`() {
         val probed = listOf(peak(1408.8, 9.1))
         val pair = PeakAttribution.assignVerifyPairWithWindows(
-            probed, vBase, vBase, 90, 470, 15.0, 6.0,
+            probed,
+            vBase,
+            vBase,
+            90,
+            470,
+            15.0,
+            6.0,
         ) { center, _ -> peak(center, 4.9) } // everything under the window floor
         assertNull("a sub-floor window read must fail the verify", pair)
     }

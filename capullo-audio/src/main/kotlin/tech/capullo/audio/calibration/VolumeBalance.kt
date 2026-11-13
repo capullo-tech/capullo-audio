@@ -89,12 +89,10 @@ object VolumeBalance {
 
     /** The same curve on a continuous axis. The intermediate arithmetic in [computeGains] lives on
      *  the amplitude side and must not be forced through integer percentages on the way. */
-    private fun percentToAmplitude(percent: Double): Double =
-        ((10.0.pow(percent.coerceIn(0.0, 100.0) / 100.0) - 1.0) / 9.0).coerceIn(0.0, 1.0)
+    private fun percentToAmplitude(percent: Double): Double = ((10.0.pow(percent.coerceIn(0.0, 100.0) / 100.0) - 1.0) / 9.0).coerceIn(0.0, 1.0)
 
     /** Inverse of [percentToAmplitude]: the percentage that yields [amplitude]. */
-    fun amplitudeToPercent(amplitude: Double): Double =
-        100.0 * log10((9.0 * amplitude.coerceIn(0.0, 1.0)) + 1.0)
+    fun amplitudeToPercent(amplitude: Double): Double = 100.0 * log10((9.0 * amplitude.coerceIn(0.0, 1.0)) + 1.0)
 
     data class Client(
         val id: String,
@@ -193,6 +191,5 @@ object VolumeBalance {
 
     /** True if [next] differs from [current] enough on any client to be worth writing out. Avoids
      *  churning the user's volumes by a percent or two on every run. */
-    fun isWorthApplying(current: Map<String, Int>, next: Map<String, Int>, minStep: Int = 3): Boolean =
-        next.any { (id, g) -> abs(g - (current[id] ?: g)) >= minStep }
+    fun isWorthApplying(current: Map<String, Int>, next: Map<String, Int>, minStep: Int = 3): Boolean = next.any { (id, g) -> abs(g - (current[id] ?: g)) >= minStep }
 }

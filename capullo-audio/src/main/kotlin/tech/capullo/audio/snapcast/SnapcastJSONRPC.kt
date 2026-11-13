@@ -28,6 +28,7 @@ data class ServerGetStatusResponse(
 ) : RequestResponse()
 
 @Serializable data class ServerStatusResult(val server: ServerInfo)
+
 @Serializable data class ServerInfo(val groups: List<Group>, val server: Server, val streams: List<Stream>)
 
 @Serializable
@@ -50,12 +51,19 @@ data class Client(
 )
 
 @Serializable data class ClientConfig(val instance: Int, val latency: Int, val name: String, val volume: Volume)
+
 @Serializable data class ClientParams(val client: Client, val id: String)
+
 @Serializable data class Volume(val muted: Boolean, val percent: Int)
+
 @Serializable data class Host(val arch: String, val ip: String, val mac: String, val name: String, val os: String)
+
 @Serializable data class LastSeen(val sec: Long, val usec: Long)
+
 @Serializable data class SnapClient(val name: String, val protocolVersion: Int, val version: String)
+
 @Serializable data class Server(val host: Host, val snapserver: SnapServer)
+
 @Serializable data class SnapServer(val controlProtocolVersion: Int, val name: String, val protocolVersion: Int, val version: String)
 
 @Serializable
@@ -168,13 +176,21 @@ abstract class Notification : SnapcastJSONRPCResponse() {
 }
 
 @Serializable data class GenericNotification(override val jsonrpc: String, override val method: String, val params: JsonObject) : Notification()
+
 @Serializable data class ClientOnVolumeChanged(override val jsonrpc: String, override val method: String, val params: VolumeParams) : Notification()
+
 @Serializable data class ClientOnLatencyChanged(override val jsonrpc: String, override val method: String, val params: LatencyParams) : Notification()
+
 @Serializable data class ClientOnDisconnect(override val jsonrpc: String, override val method: String, val params: ClientParams) : Notification()
+
 @Serializable data class ClientOnConnect(override val jsonrpc: String, override val method: String, val params: ClientParams) : Notification()
+
 @Serializable data class NameChangedParams(val id: String, val name: String)
+
 @Serializable data class ClientOnNameChanged(override val jsonrpc: String, override val method: String, val params: NameChangedParams) : Notification()
+
 @Serializable data class ServerOnUpdate(override val jsonrpc: String, override val method: String, val params: ServerStatusResult) : Notification()
+
 @Serializable data class StreamOnProperties(override val jsonrpc: String, override val method: String, val params: StreamPropertiesParams) : Notification()
 
 @Serializable data class StreamPropertiesParams(val id: String, val properties: StreamPlayerProperties)
@@ -228,17 +244,16 @@ fun StreamMetadata.firstArtist(): String = when (val a = artist) {
 }
 
 object NotificationSerializer : JsonContentPolymorphicSerializer<Notification>(Notification::class) {
-    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<Notification> =
-        when (element.jsonObject["method"].toString()) {
-            "\"Server.OnUpdate\"" -> ServerOnUpdate.serializer()
-            "\"Client.OnVolumeChanged\"" -> ClientOnVolumeChanged.serializer()
-            "\"Client.OnLatencyChanged\"" -> ClientOnLatencyChanged.serializer()
-            "\"Client.OnDisconnect\"" -> ClientOnDisconnect.serializer()
-            "\"Client.OnConnect\"" -> ClientOnConnect.serializer()
-            "\"Client.OnNameChanged\"" -> ClientOnNameChanged.serializer()
-            "\"Stream.OnProperties\"" -> StreamOnProperties.serializer()
-            else -> GenericNotification.serializer()
-        }
+    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<Notification> = when (element.jsonObject["method"].toString()) {
+        "\"Server.OnUpdate\"" -> ServerOnUpdate.serializer()
+        "\"Client.OnVolumeChanged\"" -> ClientOnVolumeChanged.serializer()
+        "\"Client.OnLatencyChanged\"" -> ClientOnLatencyChanged.serializer()
+        "\"Client.OnDisconnect\"" -> ClientOnDisconnect.serializer()
+        "\"Client.OnConnect\"" -> ClientOnConnect.serializer()
+        "\"Client.OnNameChanged\"" -> ClientOnNameChanged.serializer()
+        "\"Stream.OnProperties\"" -> StreamOnProperties.serializer()
+        else -> GenericNotification.serializer()
+    }
 }
 
 @Serializable
@@ -271,12 +286,11 @@ object RequestResponseSerializer : JsonContentPolymorphicSerializer<RequestRespo
     // Only Server.GetStatus carries a `server` object in its result; every other success reply
     // (SetLatency, SetVolume, Stream.Control "ok", ...) keeps its raw result in a generic envelope
     // instead of failing to decode as a GetStatus response.
-    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<RequestResponse> =
-        if ((element.jsonObject["result"] as? JsonObject)?.containsKey("server") == true) {
-            ServerGetStatusResponse.serializer()
-        } else {
-            GenericSuccessResponse.serializer()
-        }
+    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<RequestResponse> = if ((element.jsonObject["result"] as? JsonObject)?.containsKey("server") == true) {
+        ServerGetStatusResponse.serializer()
+    } else {
+        GenericSuccessResponse.serializer()
+    }
 }
 
 @Serializable

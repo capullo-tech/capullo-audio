@@ -9,15 +9,15 @@ import android.os.Build
 import android.util.Log
 import androidx.core.content.edit
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.UUID
@@ -51,11 +51,11 @@ class SnapclientProcess(private val context: Context) {
         get() = localHostId(context)
 
     @Volatile
-    private var _process: Process? = null
+    private var currentProcess: Process? = null
 
     fun destroy() {
-        _process?.destroyForcibly()
-        _process = null
+        currentProcess?.destroyForcibly()
+        currentProcess = null
     }
 
     fun setChannel(channel: String) {
@@ -112,10 +112,10 @@ class SnapclientProcess(private val context: Context) {
             _connectionState.update { ConnectionState.ERROR }
             return@coroutineScope
         }
-        _process = process
+        currentProcess = process
         if (!isActive) {
             process.destroyForcibly()
-            if (_process === process) _process = null
+            if (currentProcess === process) currentProcess = null
             return@coroutineScope
         }
         try {
@@ -165,7 +165,7 @@ class SnapclientProcess(private val context: Context) {
         val code = runCatching { process.waitFor() }.getOrNull()
         // Only if still ours: a restarted run may already have stored its own process here, and
         // clearing that would leave destroy() unable to stop it.
-        if (_process === process) _process = null
+        if (currentProcess === process) currentProcess = null
         if (isActive) {
             Log.e(TAG, "snapclient exited on its own (code=$code)")
             _connectionState.update { ConnectionState.ERROR }

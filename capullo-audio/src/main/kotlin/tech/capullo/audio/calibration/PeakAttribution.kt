@@ -110,10 +110,14 @@ object PeakAttribution {
         fun matchAt(drift: Double): Array<Attribution?> {
             data class Cand(val k: Int, val pi: Int, val bi: Int, val err: Double, val pattern: Int)
             val cands = mutableListOf<Cand>()
-            for (k in probesMs.indices) for (pi in p.indices) for (bi in b.indices) {
-                val err = abs((p[pi].lagMs - b[bi].lagMs - drift) - probesMs[k])
-                if (err < matchTolMs && zComparable(p[pi], b[bi])) {
-                    cands += Cand(k, pi, bi, err, patternSupport(b, p, b[bi].lagMs, probesMs[k] + drift, matchTolMs))
+            for (k in probesMs.indices) {
+                for (pi in p.indices) {
+                    for (bi in b.indices) {
+                        val err = abs((p[pi].lagMs - b[bi].lagMs - drift) - probesMs[k])
+                        if (err < matchTolMs && zComparable(p[pi], b[bi])) {
+                            cands += Cand(k, pi, bi, err, patternSupport(b, p, b[bi].lagMs, probesMs[k] + drift, matchTolMs))
+                        }
+                    }
                 }
             }
             // Rank by CLUSTER PATTERN SUPPORT first, then match quality, then earliest arrival,
@@ -136,7 +140,8 @@ object PeakAttribution {
             for (c in cands) {
                 if (out[c.k] != null || usedP[c.pi] || usedB[c.bi]) continue
                 out[c.k] = Attribution(c.k, b[c.bi].lagMs, p[c.pi].lagMs, p[c.pi].z)
-                usedP[c.pi] = true; usedB[c.bi] = true
+                usedP[c.pi] = true
+                usedB[c.bi] = true
             }
             return out
         }
@@ -151,8 +156,12 @@ object PeakAttribution {
         val atZero = matchAt(0.0)
         val estimate = modalValue(
             buildList {
-                for (k in probesMs.indices) for (pi in p.indices) for (bi in b.indices) {
-                    if (zComparable(p[pi], b[bi])) add(p[pi].lagMs - b[bi].lagMs - probesMs[k])
+                for (k in probesMs.indices) {
+                    for (pi in p.indices) {
+                        for (bi in b.indices) {
+                            if (zComparable(p[pi], b[bi])) add(p[pi].lagMs - b[bi].lagMs - probesMs[k])
+                        }
+                    }
                 }
             },
             matchTolMs,
@@ -193,8 +202,12 @@ object PeakAttribution {
         if (p.size < 2 || b.isEmpty()) return null
         val drift = modalValue(
             buildList {
-                for (off in intArrayOf(refOffMs, tgtOffMs)) for (pp in p) for (bb in b) {
-                    add(pp.lagMs - bb.lagMs - off)
+                for (off in intArrayOf(refOffMs, tgtOffMs)) {
+                    for (pp in p) {
+                        for (bb in b) {
+                            add(pp.lagMs - bb.lagMs - off)
+                        }
+                    }
                 }
             },
             matchTolMs,
@@ -259,8 +272,7 @@ object PeakAttribution {
                 if (err <= matchTolMs) pp to err else null
             }
             .minByOrNull { it.second }?.first
-        fun drift(pp: Dsp.Peak, off: Int): Double =
-            pp.lagMs - b.minByOrNull { abs(pp.lagMs - it.lagMs - off) }!!.lagMs - off
+        fun drift(pp: Dsp.Peak, off: Int): Double = pp.lagMs - b.minByOrNull { abs(pp.lagMs - it.lagMs - off) }!!.lagMs - off
         fun window(off: Int, d: Double, exclude: Dsp.Peak): Dsp.Peak? {
             if (windowPeak == null) return null
             return clusterLeaders(baselineFull)
@@ -360,8 +372,11 @@ object PeakAttribution {
                 bestTracked = tracked
             }
         }
-        return if (bestTracked.size >= minHits) Confirmation(bestRef?.lagMs, bestTracked)
-        else Confirmation(null, emptyMap())
+        return if (bestTracked.size >= minHits) {
+            Confirmation(bestRef?.lagMs, bestTracked)
+        } else {
+            Confirmation(null, emptyMap())
+        }
     }
 
     /** Collapse peaks into clusters seeded strongest-first: a peak within [clusterMs] of an
@@ -373,7 +388,11 @@ object PeakAttribution {
         val leaders = mutableListOf<Dsp.Peak>()
         for (p in peaks.sortedByDescending { it.z }) {
             val i = leaders.indexOfFirst { abs(it.lagMs - p.lagMs) <= clusterMs }
-            if (i < 0) leaders += p else if (p.lagMs < leaders[i].lagMs) leaders[i] = p
+            if (i < 0) {
+                leaders += p
+            } else if (p.lagMs < leaders[i].lagMs) {
+                leaders[i] = p
+            }
         }
         return leaders
     }

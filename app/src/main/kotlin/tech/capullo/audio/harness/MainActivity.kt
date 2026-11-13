@@ -33,8 +33,7 @@ class MainActivity : Activity() {
             override val size: Int = 1
             override val currentIndex: Int = 0
             override val isRotating: Boolean = true
-            override fun idAt(index: Int): String? =
-                if (index == 0) "https://example.org/stream.mp3" else null
+            override fun idAt(index: Int): String? = if (index == 0) "https://example.org/stream.mp3" else null
         }
     }
 

@@ -23,6 +23,7 @@ object SnapcastRemoteArt {
     const val MAX_BYTES = 5 * 1024 * 1024
     private const val CONNECT_TIMEOUT_MS = 5_000
     private const val READ_TIMEOUT_MS = 10_000
+
     /** Whole-transfer deadline: the read timeout alone would let a slow-drip server hold a fetch for ever. */
     private const val TOTAL_TIMEOUT_MS = 30_000L
 

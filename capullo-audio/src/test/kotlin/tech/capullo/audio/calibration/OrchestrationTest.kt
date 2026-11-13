@@ -23,6 +23,7 @@ class OrchestrationTest {
     ) : CalibrationControl {
         val latency = initial.toMutableMap()
         val volumeCalls = mutableListOf<Triple<String, Boolean, Int>>() // (id, muted, percent), in order
+
         /** The volume each client is at RIGHT NOW, tracked (not just logged) so a scene can render
          *  a boosted speaker as detectable and the same speaker unboosted as not. That distinction
          *  is the entire boost gap: a level read is only admissible at the real gain. */
@@ -49,7 +50,9 @@ class OrchestrationTest {
             return saveOk
         }
         override fun load(): Map<String, ClientSnapshot>? = stored
-        override fun clear() { stored = null }
+        override fun clear() {
+            stored = null
+        }
     }
 
     /**
@@ -135,6 +138,7 @@ class OrchestrationTest {
                 }
             }
         }
+
         /** [sources] is recorded rather than acted on: this fake renders one peak per client by
          *  construction, so it has no cluster for the per-source search to matter to. The callers'
          *  expectation that it matches the audible-client count is asserted in
@@ -155,6 +159,7 @@ class OrchestrationTest {
             val p = peaks(-1) // probe measurement; not counted against dropOnMeasureCall
             return Triple(p, p, p)
         }
+
         /** Answers by LAG, like the real one: find whose arrival sits at this lag and report its
          *  level. A lag nobody is playing at reads ~1.0 (the correlation floor), which is what makes
          *  an absent speaker distinguishable instead of scoring like a present one. */
@@ -374,8 +379,10 @@ class OrchestrationTest {
             z = mapOf("ref" to 40.0, "t" to 20.0),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -404,8 +411,10 @@ class OrchestrationTest {
             nullOnMeasureCall = 3, // all three baseline captures dead -> the round fails
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -448,8 +457,10 @@ class OrchestrationTest {
             z = mapOf("ref" to 40.0, "a" to 25.0, "b" to 20.0),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -488,8 +499,10 @@ class OrchestrationTest {
         )
         val osCalls = mutableListOf<Pair<Map<String, Int>, Long>>()
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
             publishOsBoost = { targets, lease -> osCalls += targets to lease },
         )
         cal.calibrate(
@@ -527,8 +540,10 @@ class OrchestrationTest {
         )
         val osCalls = mutableListOf<Pair<Map<String, Int>, Long>>()
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
             publishOsBoost = { targets, lease -> osCalls += targets to lease },
         )
         cal.calibrate(
@@ -558,8 +573,10 @@ class OrchestrationTest {
             z = mapOf("ref" to 40.0, "a" to 25.0),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -588,8 +605,10 @@ class OrchestrationTest {
             z = mapOf("ref" to 40.0, "t" to 20.0),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         val ok = cal.calibrate(
             listOf(
@@ -618,8 +637,10 @@ class OrchestrationTest {
             z = mapOf("ref" to 40.0, "t" to 20.0),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -647,8 +668,10 @@ class OrchestrationTest {
             z = mapOf("ref" to 170.0, "t" to 20.0),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -683,8 +706,10 @@ class OrchestrationTest {
                 nullOnCalls = setOf(5, 6, 7, 8, 9), // 1-3 baselines, 4-9 harvest probes
             )
             val cal = SyncCalibrator(
-                tapArm = {}, control = control,
-                readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+                tapArm = {},
+                control = control,
+                readLatencies = { control.latency.toMap() },
+                measurerFactory = { measurer },
             )
             cal.calibrate(
                 listOf(
@@ -710,8 +735,10 @@ class OrchestrationTest {
                 level = mapOf("ref" to 1.0, "t" to 0.5),
             )
             val cal = SyncCalibrator(
-                tapArm = {}, control = control,
-                readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+                tapArm = {},
+                control = control,
+                readLatencies = { control.latency.toMap() },
+                measurerFactory = { measurer },
             )
             cal.calibrate(
                 listOf(
@@ -756,8 +783,10 @@ class OrchestrationTest {
             nullOnCalls = setOf(1, 2, 3),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -792,8 +821,10 @@ class OrchestrationTest {
             audibleAtLeastPercent = mapOf("t" to 60),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -832,8 +863,10 @@ class OrchestrationTest {
         }
         val (control, measurer) = scene()
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(clients("ref" to 0, "t" to 0))
         assertTrue("the easy path is not boosted", control.volumeCalls.none { it.third == 60 })
@@ -858,8 +891,10 @@ class OrchestrationTest {
             nullOnCalls = setOf(1, 2, 3), // force the boosted retry
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -892,8 +927,10 @@ class OrchestrationTest {
             nullOnCalls = setOf(1, 2, 3), // force the boosted retry
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -934,8 +971,10 @@ class OrchestrationTest {
             nullOnCalls = setOf(1, 2, 3), // the unboosted attempt fails; the boosted retry works
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -976,8 +1015,10 @@ class OrchestrationTest {
             nullOnCalls = setOf(1, 2, 3), // the unboosted attempt fails; the boosted retry works
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1022,8 +1063,10 @@ class OrchestrationTest {
         // checked against measurement progress rather than against wall-clock ordering.
         val osEvents = mutableListOf<Pair<Boolean, Int>>() // (released, captures taken so far)
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
             publishOsBoost = { targets, _ -> osEvents += targets.isEmpty() to measurer.measureCalls },
         )
         cal.calibrate(
@@ -1071,8 +1114,10 @@ class OrchestrationTest {
             nullOnCalls = setOf(1, 2, 3) + (14..18).toSet(),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1122,8 +1167,10 @@ class OrchestrationTest {
             nullOnCalls = setOf(1, 2, 3), // force the boosted retry, so the recovery runs
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1168,8 +1215,10 @@ class OrchestrationTest {
             audibleAtLeastPercent = mapOf("t" to 60),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1211,8 +1260,10 @@ class OrchestrationTest {
             level = mapOf("ref" to 1.0, "t" to 0.5),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         val ok = cal.calibrate(
             listOf(
@@ -1256,8 +1307,10 @@ class OrchestrationTest {
             z = mapOf("ref" to 40.0, "t" to 20.0),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1282,8 +1335,10 @@ class OrchestrationTest {
             z = mapOf("ref" to 30.0, "t" to 30.0),
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1310,8 +1365,10 @@ class OrchestrationTest {
             dropOnMeasureCall = "t" to 11,
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1343,8 +1400,10 @@ class OrchestrationTest {
                 level = mapOf("ref" to 20.0, "t" to 1.0), // the target is actually at the floor
             )
             val cal = SyncCalibrator(
-                tapArm = {}, control = control,
-                readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+                tapArm = {},
+                control = control,
+                readLatencies = { control.latency.toMap() },
+                measurerFactory = { measurer },
             )
             cal.calibrate(
                 listOf(
@@ -1395,8 +1454,10 @@ class OrchestrationTest {
             levelHalfMs = 25.0, // mirrors SyncCalibrator.LEVEL_READ_HALF_MS
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1440,8 +1501,10 @@ class OrchestrationTest {
             maskedZ = 7.0, // rig-measured range for a real masked arrival: 6.5-9.0
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1470,8 +1533,10 @@ class OrchestrationTest {
             maskedZ = 7.0,
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1499,8 +1564,10 @@ class OrchestrationTest {
             maskedZ = 5.0,
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1528,8 +1595,10 @@ class OrchestrationTest {
             windowNoiseZ = 7.0, // plausible z — only the spacing test can catch this
         )
         val cal = SyncCalibrator(
-            tapArm = {}, control = control,
-            readLatencies = { control.latency.toMap() }, measurerFactory = { measurer },
+            tapArm = {},
+            control = control,
+            readLatencies = { control.latency.toMap() },
+            measurerFactory = { measurer },
         )
         cal.calibrate(
             listOf(
@@ -1560,7 +1629,9 @@ class OrchestrationTest {
         // landed the other side of zero while its lags matched the round to 10 ms. Declining here
         // refuses to correct a room that genuinely needs it.
         val cal = SyncCalibrator(
-            tapArm = {}, control = FakeControl(emptyMap()), readLatencies = { emptyMap() },
+            tapArm = {},
+            control = FakeControl(emptyMap()),
+            readLatencies = { emptyMap() },
         )
         val levels = cal.reduceLevels(signScene(), List(5) { false })
         assertTrue("geometry was intact, so the run must not be declined as a swap", levels.isNotEmpty())
@@ -1575,7 +1646,9 @@ class OrchestrationTest {
         // reports the reciprocal ratio with full confidence, so repetition cannot catch it and the
         // gate must still refuse.
         val cal = SyncCalibrator(
-            tapArm = {}, control = FakeControl(emptyMap()), readLatencies = { emptyMap() },
+            tapArm = {},
+            control = FakeControl(emptyMap()),
+            readLatencies = { emptyMap() },
         )
         val suspect = listOf(false, false, true, false, false)
         assertTrue(

@@ -62,7 +62,9 @@ class SnapserverDiscoveryManager(context: Context) {
 
     fun stopDiscovery() {
         discoveryListeners.forEach {
-            try { nsdManager.stopServiceDiscovery(it) } catch (_: Exception) {}
+            try {
+                nsdManager.stopServiceDiscovery(it)
+            } catch (_: Exception) {}
         }
         discoveryListeners.clear()
 
@@ -149,7 +151,9 @@ class SnapserverDiscoveryManager(context: Context) {
             ?.filter { !it.isLoopbackAddress }
             ?.mapNotNull { it.hostAddress }
             ?.toSet() ?: emptySet()
-    } catch (_: Exception) { emptySet() }
+    } catch (_: Exception) {
+        emptySet()
+    }
 
     private fun rebuildList() {
         val localIps = localIpAddresses()

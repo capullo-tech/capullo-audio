@@ -32,7 +32,6 @@ import java.nio.ByteBuffer
  * playback thread and freezes player position, which the engine watchdog in
  * PlaybackService detects, same as with VLC's blocked sout.
  */
-@UnstableApi
 /**
  * @param fifoPath the named pipe the tee'd PCM is written into.
  * @param enableKeepAlive when true (default), a background thread writes silence into the FIFO
@@ -43,6 +42,7 @@ import java.nio.ByteBuffer
  *   the keep-alive overfeeds the pipe - the tee back-pressures the sink (ExoPlayer buffers) and the
  *   snapclient overflows (stutter). Such apps feed the FIFO from real PCM only.
  */
+@UnstableApi
 class FifoAudioBufferSink(
     private val fifoPath: String,
     private val enableKeepAlive: Boolean = true,
@@ -50,13 +50,16 @@ class FifoAudioBufferSink(
 
     // Opened on the caller's thread (main), written on the playback thread
     @Volatile private var fd: FileDescriptor? = null
+
     @Volatile private var out: FileOutputStream? = null
+
     // Writes stay disabled until the player reports playing (VLC parity: sout
     // only wrote after Event.Playing). The FIFO holds only ~370ms of PCM and
     // snapserver (the reader) isn't started yet during preroll - writing early
     // fills the pipe and BLOCKS the playback thread before STATE_READY can
     // fire: deadlock, buffering stuck at 0%.
     @Volatile private var writeEnabled = false
+
     // A released ExoPlayer flushes its sink asynchronously; without this flag
     // the dying player's flush() would reopen the closed FIFO and dribble
     // stale buffers into the next session's fresh pipe.
@@ -81,9 +84,12 @@ class FifoAudioBufferSink(
     // genuinely stuck station (position frozen ~20s) - priming only keeps the SNAPCAST stream alive, it
     // doesn't advance ExoPlayer's clock.
     private val writeLock = Any()
+
     @Volatile private var lastRealWriteNs = 0L
+
     @Volatile private var priming = false
     private var silenceThread: Thread? = null
+
     // 40ms of the guaranteed 48000Hz/16-bit/stereo format (LOCKSTEP with SnapserverProcess) = 1920 frames * 4 bytes.
     private val silence = ByteArray(48000 * SILENCE_CHUNK_MS / 1000 * 2 * 2)
 
@@ -118,7 +124,11 @@ class FifoAudioBufferSink(
                     if (!closed) Log.w(TAG, "FIFO silence keep-alive write failed: ${e.message}")
                 }
             }
-        }.apply { name = "FifoSilenceKeepAlive"; isDaemon = true; start() }
+        }.apply {
+            name = "FifoSilenceKeepAlive"
+            isDaemon = true
+            start()
+        }
     }
 
     // True while no real PCM has flowed for longer than the idle threshold (or none ever has).
@@ -145,7 +155,9 @@ class FifoAudioBufferSink(
         priming = false
         silenceThread?.interrupt()
         silenceThread = null
-        try { out?.close() } catch (_: Exception) {}
+        try {
+            out?.close()
+        } catch (_: Exception) {}
         out = null
         fd = null // closed via the stream
     }
@@ -154,10 +166,12 @@ class FifoAudioBufferSink(
     // Guarded by writeLock. 2 s of 48 kHz stereo 16-bit: far more than the few hundred ms the
     // player still pushes after a pause.
     private val pauseGate = PcmPauseGate(capacityBytes = 48_000 * 4 * 2, fadeBytes = 48_000 * 4 * FADE_MS / 1000)
+
     // The user-visible pause state. Both setters are lock-free: writeLock is held across blocking
     // FIFO writes, and these are called from the main thread. The gate itself is only touched on
     // the playback thread, under writeLock, in handleBuffer/flush.
     @Volatile private var paused = false
+
     @Volatile private var releaseHeld = false
 
     /**
@@ -279,11 +293,13 @@ class FifoRenderersFactory(
         // LOCKSTEP with SnapserverProcess.SAMPLE_FORMAT (48000) - the FIFO is read at that rate.
         val resampler = SonicAudioProcessor().apply { setOutputSampleRateHz(48000) }
         return DefaultAudioSink.Builder(context)
-            .setEnableFloatOutput(false)  // keep the chain in 16-bit PCM
+            .setEnableFloatOutput(false) // keep the chain in 16-bit PCM
             .setAudioProcessorChain(
                 DefaultAudioSink.DefaultAudioProcessorChain(
-                    mixer, resampler, TeeAudioProcessor(fifoSink),
-                )
+                    mixer,
+                    resampler,
+                    TeeAudioProcessor(fifoSink),
+                ),
             )
             .build()
     }
