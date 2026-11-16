@@ -61,10 +61,11 @@ internal class QueuePlaybackLoop(
 
     /** Overlay the engine's live clock onto a source snapshot. Called by the engine on every source
      *  metadata emission and internally on play/pause + advance. */
-    fun republish() { _nowPlaying.value = overlay(sourceNowPlaying.value) }
+    fun republish() {
+        _nowPlaying.value = overlay(sourceNowPlaying.value)
+    }
 
-    private fun overlay(base: NowPlaying): NowPlaying =
-        base.copy(positionMs = playback.positionMs, isPlaying = playback.isPlaying)
+    private fun overlay(base: NowPlaying): NowPlaying = base.copy(positionMs = playback.positionMs, isPlaying = playback.isPlaying)
 
     /**
      * Play a specific id - the app-driven selection path (QuantumCast picks a station and calls

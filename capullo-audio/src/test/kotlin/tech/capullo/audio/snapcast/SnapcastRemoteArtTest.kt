@@ -8,8 +8,7 @@ import java.io.ByteArrayInputStream
 
 class SnapcastRemoteArtTest {
 
-    private fun resolve(artUrl: String?, host: String = "192.168.1.20", port: Int = 41234) =
-        SnapcastRemoteArt.resolveUrl(artUrl, host, port)
+    private fun resolve(artUrl: String?, host: String = "192.168.1.20", port: Int = 41234) = SnapcastRemoteArt.resolveUrl(artUrl, host, port)
 
     @Test
     fun `a path is fetched from the snapserver the listener is connected to`() {

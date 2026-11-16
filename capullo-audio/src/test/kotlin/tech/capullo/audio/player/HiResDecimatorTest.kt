@@ -27,7 +27,10 @@ class HiResDecimatorTest {
         val amp = 16_000.0
         val out = ArrayList<Short>()
         fun collect(b: ByteBuffer) {
-            while (b.remaining() >= 4) { out.add(b.short); b.short }
+            while (b.remaining() >= 4) {
+                out.add(b.short)
+                b.short
+            }
         }
         val chunkFrames = 1024
         var i = 0
@@ -35,7 +38,8 @@ class HiResDecimatorTest {
             val buf = ByteBuffer.allocateDirect(chunkFrames * 4).order(ByteOrder.nativeOrder())
             repeat(chunkFrames) {
                 val s = (sin(2 * PI * toneHz * i++ / inRate) * amp).toInt().toShort()
-                buf.putShort(s); buf.putShort(s)
+                buf.putShort(s)
+                buf.putShort(s)
             }
             buf.flip()
             dec.queueInput(buf)

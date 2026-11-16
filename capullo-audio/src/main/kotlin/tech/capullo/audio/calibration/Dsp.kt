@@ -24,11 +24,18 @@ object Dsp {
         var j = 0
         for (i in 0 until n - 1) {
             if (i < j) {
-                var t = re[i]; re[i] = re[j]; re[j] = t
-                t = im[i]; im[i] = im[j]; im[j] = t
+                var t = re[i]
+                re[i] = re[j]
+                re[j] = t
+                t = im[i]
+                im[i] = im[j]
+                im[j] = t
             }
             var m = n shr 1
-            while (j >= m && m > 0) { j -= m; m = m shr 1 }
+            while (j >= m && m > 0) {
+                j -= m
+                m = m shr 1
+            }
             j += m
         }
         var len = 2
@@ -42,11 +49,14 @@ object Dsp {
                 var curRe = 1.0
                 var curIm = 0.0
                 for (k in 0 until len / 2) {
-                    val aRe = re[i + k]; val aIm = im[i + k]
+                    val aRe = re[i + k]
+                    val aIm = im[i + k]
                     val bRe = re[i + k + len / 2] * curRe - im[i + k + len / 2] * curIm
                     val bIm = re[i + k + len / 2] * curIm + im[i + k + len / 2] * curRe
-                    re[i + k] = aRe + bRe; im[i + k] = aIm + bIm
-                    re[i + k + len / 2] = aRe - bRe; im[i + k + len / 2] = aIm - bIm
+                    re[i + k] = aRe + bRe
+                    im[i + k] = aIm + bIm
+                    re[i + k + len / 2] = aRe - bRe
+                    im[i + k + len / 2] = aIm - bIm
                     val nRe = curRe * wRe - curIm * wIm
                     curIm = curRe * wIm + curIm * wRe
                     curRe = nRe
@@ -56,7 +66,10 @@ object Dsp {
             len = len shl 1
         }
         if (inverse) {
-            for (k in 0 until n) { re[k] /= n; im[k] /= n }
+            for (k in 0 until n) {
+                re[k] /= n
+                im[k] /= n
+            }
         }
     }
 
@@ -235,11 +248,14 @@ object Dsp {
     ): DoubleArray {
         var n = 1
         while (n < ref.size + mic.size) n = n shl 1
-        val aRe = DoubleArray(n); val aIm = DoubleArray(n)
-        val bRe = DoubleArray(n); val bIm = DoubleArray(n)
+        val aRe = DoubleArray(n)
+        val aIm = DoubleArray(n)
+        val bRe = DoubleArray(n)
+        val bIm = DoubleArray(n)
         for (i in ref.indices) aRe[i] = ref[i].toDouble()
         for (i in mic.indices) bRe[i] = mic[i].toDouble()
-        fft(aRe, aIm); fft(bRe, bIm)
+        fft(aRe, aIm)
+        fft(bRe, bIm)
         // The regularizer is a fraction of the program's MEAN band power, so it adapts to the
         // material and to the overall level instead of being an absolute floor that means different
         // things on quiet and loud passages. Computed before the loop below overwrites the reference

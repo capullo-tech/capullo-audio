@@ -53,8 +53,7 @@ internal class ArtFileStore(
         return urlPrefix + name
     }
 
-    private fun contentHash(bytes: ByteArray): String =
-        // 128 bits of SHA-256: collision-free for any realistic art history, and a short URL.
+    private fun contentHash(bytes: ByteArray): String = // 128 bits of SHA-256: collision-free for any realistic art history, and a short URL.
         MessageDigest.getInstance("SHA-256").digest(bytes).take(16)
             .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
 }

@@ -31,12 +31,17 @@ class MicCapture(private val context: Context) {
             MediaRecorder.AudioSource.VOICE_RECOGNITION
         }
         val minBuf = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
         )
         val recorder = try {
             AudioRecord(
-                source, SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf * 4, SAMPLE_RATE),
+                source,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBuf * 4, SAMPLE_RATE),
             )
         } catch (e: Exception) {
             Log.e(TAG, "AudioRecord create failed: ${e.message}")
@@ -70,7 +75,9 @@ class MicCapture(private val context: Context) {
             }
             Capture(out, firstSampleNanos, SAMPLE_RATE)
         } finally {
-            try { recorder.stop() } catch (_: Exception) {}
+            try {
+                recorder.stop()
+            } catch (_: Exception) {}
             recorder.release()
         }
     }

@@ -75,8 +75,8 @@ class SyncCalibrator(
     /** The production measurer: records the mic and correlates against [ring]. */
     private fun micMeasurer(ring: ReferencePcmRing) = object : Measurer {
         override suspend fun measure(peakCount: Int, sources: Int) = micMeasure(ring, peakCount, sources)
-        override suspend fun measureHalves(peakCount: Int, sources: Int) =
-            micMeasureHalves(ring, peakCount, sources)
+        override suspend fun measureHalves(peakCount: Int, sources: Int) = micMeasureHalves(ring, peakCount, sources)
+
         // LEVELS ARE READ WITH A LOCAL SEARCH, not at a point. The lag a round knows an arrival by
         // carries 10-70 ms of uncertainty once a speaker is more than a few dB down (rig
         // 2026-08-11: the same quiet speaker matched 74 ms apart in consecutive captures), and a
@@ -87,10 +87,8 @@ class SyncCalibrator(
         // trustworthy at this imbalance (it tracked a commanded 12.4 dB step to 0.08 dB while a
         // blind search could not locate the quiet speaker at all). Both clients get the same
         // treatment, so the RATIO — the only thing the balance uses — stays honest.
-        override fun levelReader(): ((Double) -> Double)? =
-            lastMeasurement?.let { m -> { lag -> Dsp.levelAt(m.levelCorrelation, m.fs, lag, LEVEL_READ_HALF_MS) } }
-        override fun timingReader(): ((Double, Double) -> Dsp.Peak?)? =
-            lastMeasurement?.let { m -> { lag, tol -> m.timingPeakNear(lag, tol) } }
+        override fun levelReader(): ((Double) -> Double)? = lastMeasurement?.let { m -> { lag -> Dsp.levelAt(m.levelCorrelation, m.fs, lag, LEVEL_READ_HALF_MS) } }
+        override fun timingReader(): ((Double, Double) -> Dsp.Peak?)? = lastMeasurement?.let { m -> { lag, tol -> m.timingPeakNear(lag, tol) } }
         override fun fullPeaks(): List<Dsp.Peak>? = lastMeasurement?.peaks
     }
 
@@ -167,7 +165,6 @@ class SyncCalibrator(
      *  one gets SAID rather than looking like the first. */
     private var levelRecoveryAttempted = false
 
-
     /** A FINAL latency write (commit or restore) — records it for run-level read-back.
      *  Transient probe writes use [control].sendSetLatency directly and are not recorded. */
     private suspend fun commitLatency(id: String, latencyMs: Int) {
@@ -227,12 +224,14 @@ class SyncCalibrator(
         }
         val muted = allClients.drop(1).filter { it.muted }
         val clients = listOf(reference) + allClients.drop(1).filterNot { it.muted }
-        mutedNote = if (muted.isEmpty()) "" else {
+        mutedNote = if (muted.isEmpty()) {
+            ""
+        } else {
             "; skipped (muted): " + muted.joinToString { it.name }
         }
         if (clients.size < 2) {
             _state.value = State.Failed(
-                "no unmuted speaker to calibrate against ${reference.name}${mutedNote}",
+                "no unmuted speaker to calibrate against ${reference.name}$mutedNote",
             )
             return false
         }
@@ -355,7 +354,12 @@ class SyncCalibrator(
             val standing = outcome?.standingMisalignmentMs
             if (boosted && standing != null && outcome != null) {
                 harvestLevelsUnboosted(
-                    measurer, reference, target, others, outcome.targetLatencyMs, standing,
+                    measurer,
+                    reference,
+                    target,
+                    others,
+                    outcome.targetLatencyMs,
+                    standing,
                 )
             }
             if (outcome != null) successes++
@@ -542,6 +546,7 @@ class SyncCalibrator(
         val samples = mutableListOf<Pair<Int, Double>>() // delta -> weight
         var lastAttr: PeakAttribution.Result? = null
         var refNotFound = false
+
         // TARGETED REFERENCE RESCUE, collected while iterating and adjudicated after the loop.
         //
         // Measured on this rig (replayed offline from the 2026-08-10 20:04 failing run and four PCM
@@ -573,6 +578,7 @@ class SyncCalibrator(
             val peak: ((Double, Double) -> Dsp.Peak?)?,
         )
         val rescues = mutableListOf<RefRescue>()
+
         /** Probe captures that already produced a level candidate. */
         val levelledCaptures = mutableSetOf<Int>()
 
@@ -679,8 +685,13 @@ class SyncCalibrator(
                             levelled = true
                             levelledCaptures += attempt
                             levelCands += LevelCand(
-                                attempt, probedLevel, probedTiming,
-                                r.probedLagMs, t.probedLagMs, r.z, t.z,
+                                attempt,
+                                probedLevel,
+                                probedTiming,
+                                r.probedLagMs,
+                                t.probedLagMs,
+                                r.z,
+                                t.z,
                             )
                         }
                     }
@@ -886,7 +897,14 @@ class SyncCalibrator(
         // RESCUE_MIN_Z fails the verify exactly as before.
         val (vRef, vTgt) = PeakAttribution.assignVerifyPair(vProbed, vBase, refOff, tgtOff, MATCH_TOL_MS)
             ?: PeakAttribution.assignVerifyPairWithWindows(
-                vProbed, vBase, vBaseFull, refOff, tgtOff, MATCH_TOL_MS, RESCUE_MIN_Z, vTiming,
+                vProbed,
+                vBase,
+                vBaseFull,
+                refOff,
+                tgtOff,
+                MATCH_TOL_MS,
+                RESCUE_MIN_Z,
+                vTiming,
             )?.also { (r, t) ->
                 Log.i(
                     TAG,
@@ -931,7 +949,6 @@ class SyncCalibrator(
             standingMisalignmentMs = residualMs,
         )
     }
-
 
     // ---- pair-round building blocks --------------------------------------------------
     //
@@ -1156,7 +1173,7 @@ class SyncCalibrator(
                     Log.i(
                         TAG,
                         "balance: levels-only round stopping at ${cands.size} usable capture(s) " +
-                            "after ${attempt} probe(s) — enough for the estimator, so the " +
+                            "after $attempt probe(s) — enough for the estimator, so the " +
                             "remaining ${PROBE_REPEATS * 2 - attempt} are not worth the time",
                     )
                     break
@@ -1170,7 +1187,14 @@ class SyncCalibrator(
                     // failed on the rig on 2026-08-14, and it is why this round exists at all.
                     val pair = PeakAttribution.assignVerifyPair(probed, vBase, refOff, tgtOff, MATCH_TOL_MS)
                         ?: PeakAttribution.assignVerifyPairWithWindows(
-                            probed, vBase, vBaseFull, refOff, tgtOff, MATCH_TOL_MS, RESCUE_MIN_Z, peak,
+                            probed,
+                            vBase,
+                            vBaseFull,
+                            refOff,
+                            tgtOff,
+                            MATCH_TOL_MS,
+                            RESCUE_MIN_Z,
+                            peak,
                         )
                     if (pair != null) {
                         val (r, t) = pair
@@ -1497,7 +1521,10 @@ class SyncCalibrator(
             for (target in webRetry) {
                 progress("re-measuring ${target.name} at the boost ceiling…")
                 val outcome = mutedPairRound(
-                    measurer, reference, target, others = emptyList(),
+                    measurer,
+                    reference,
+                    target,
+                    others = emptyList(),
                     boostPercent = BOOST_RAMP_PERCENT.last(),
                 )
                 if (outcome != null) succeeded += target.id
@@ -1668,7 +1695,6 @@ class SyncCalibrator(
     }
 
     // ---- volume balance ------------------------------------------------------------
-
 
     /**
      * Even the speakers out AT THE MIC, so the stereo image centres where the recording device sits
@@ -2011,6 +2037,7 @@ class SyncCalibrator(
             !consistent -> Gate.DEFERRED
             else -> Gate.APPLY
         }
+
         /**
          * Peak budget for the two-speaker pair path, split across the two sources by
          * [Dsp.findPeaksPerSource] rather than spent on whichever speaker is loudest.
@@ -2114,7 +2141,6 @@ class SyncCalibrator(
          *  this prefix is excluded from calibration entirely. */
         const val REFERENCE_TAP_PREFIX = "qctap-"
 
-
         /** Floor the no-mute batch lifts a too-quiet client to before measuring. A FLOOR, not the
          *  cap: the batch runs while people are listening, so it must not shout — it only raises
          *  speakers already below this and leaves the rest untouched. PLACEHOLDER pending a rig
@@ -2174,17 +2200,21 @@ class SyncCalibrator(
          *  and deferred. Wide enough to let a genuine change through after two consistent runs,
          *  tight enough to reject the ±40 ms outliers seen on-rig. */
         private const val DAMPING_TOL_MS = 45
+
         /** A residual larger than any real BT/web sink gap; a computed delta beyond it
          *  means the target was matched to a ghost. Kept well above legitimate cold-start
          *  corrections (iPhone web needed ~+217). */
         private const val MAX_PLAUSIBLE_DELTA_MS = 500
+
         /** Split-half consistency gate: the delta re-derived on each 6 s half of the probe
          *  capture must agree within this. Loudness-invariant (replaces the rig-dependent z
          *  gate) — a steady weak peak passes, a jittery one (run-5 noise-chasing) doesn't. */
         private const val SPLIT_TOL_MS = 12
+
         /** Window to relocate a full-capture peak lag within a half's peaks. */
         private const val SPLIT_FIND_MS = 30.0
         private const val SETTLE_MS = 7_000L
+
         /** Time for a SetLatency write + a GetStatus refresh to reflect in the host's
          *  status before read-back reads it back. */
         private const val READBACK_MS = 600L

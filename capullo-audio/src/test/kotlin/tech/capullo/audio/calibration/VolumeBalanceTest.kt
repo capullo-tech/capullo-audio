@@ -83,8 +83,7 @@ class VolumeBalanceTest {
         // was ~3x too small near the top of the range survived: the test agreed with it.
         var gains = mapOf("near" to 80, "far" to 80)
         val efficiency = mapOf("near" to 3.0, "far" to 1.0) // near is 3x more efficient at the mic
-        fun measure(id: String) =
-            efficiency.getValue(id) * VolumeBalance.percentToAmplitude(gains.getValue(id))
+        fun measure(id: String) = efficiency.getValue(id) * VolumeBalance.percentToAmplitude(gains.getValue(id))
         var previousSpread = Double.MAX_VALUE
         repeat(6) {
             val spread = maxOf(measure("near"), measure("far")) / minOf(measure("near"), measure("far"))

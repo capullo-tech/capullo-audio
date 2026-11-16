@@ -55,12 +55,16 @@ class EnginePlaybackContractTest {
             override val size = ids.size
             override val currentIndex = startIndex
             override val isRotating = rotating
-            override fun idAt(index: Int): String? =
-                if (rotating) ids[((index % ids.size) + ids.size) % ids.size]
-                else ids.getOrNull(index)
+            override fun idAt(index: Int): String? = if (rotating) {
+                ids[((index % ids.size) + ids.size) % ids.size]
+            } else {
+                ids.getOrNull(index)
+            }
         }
 
-        override fun onQueueAdvanced(currentIndex: Int) { events += "adv:$currentIndex" }
+        override fun onQueueAdvanced(currentIndex: Int) {
+            events += "adv:$currentIndex"
+        }
     }
 
     private class FakeMediaPlayback : MediaPlayback {
@@ -70,7 +74,10 @@ class EnginePlaybackContractTest {
         override var positionMs: Long = 0L
         override var isPlaying: Boolean = false
 
-        override fun play(request: MediaRequest) { played += request; isPlaying = true }
+        override fun play(request: MediaRequest) {
+            played += request
+            isPlaying = true
+        }
         override fun release() {}
 
         fun fireEnded() = onEnded?.invoke()
@@ -129,7 +136,10 @@ class EnginePlaybackContractTest {
     fun `the engine clock overlays and overrides the source now-playing`() = runTest {
         // The source only ever sets isPlaying=true/positionMs=0; the engine owns the real clock.
         val np = MutableStateFlow(NowPlaying(title = "T", isPlaying = true, canGoNext = true))
-        val playback = FakeMediaPlayback().apply { isPlaying = false; positionMs = 1234 }
+        val playback = FakeMediaPlayback().apply {
+            isPlaying = false
+            positionMs = 1234
+        }
         val loop = QueuePlaybackLoop(FakeSource(listOf("a")), nowPlayingOf(np), playback, this)
 
         val overlaid = loop.nowPlaying.value

@@ -33,10 +33,10 @@ class MeasurementLevelWiringTest {
 
         // DelayMeasurement's relation: mic[k] == ref[iMicStart + k - D] for a speaker of delay D.
         // So synthesize the mic by reading the ring that far back, rather than by shifting forward.
-        val micStart = fs * 2          // ring index where the capture begins (also the search span)
+        val micStart = fs * 2 // ring index where the capture begins (also the search span)
         val micLen = fs * 3
-        val dRef = fs * 1000 / 1000    // 1000 ms
-        val dTgt = fs * 1200 / 1000    // 1200 ms - 200 ms apart, like a probed capture
+        val dRef = fs * 1000 / 1000 // 1000 ms
+        val dTgt = fs * 1200 / 1000 // 1200 ms - 200 ms apart, like a probed capture
         val micPcm = FloatArray(micLen)
         for (k in 0 until micLen) {
             micPcm[k] = source[micStart + k - dRef] + 0.25f * source[micStart + k - dTgt]

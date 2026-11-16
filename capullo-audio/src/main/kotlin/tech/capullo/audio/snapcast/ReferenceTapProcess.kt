@@ -172,7 +172,8 @@ class ReferenceTapProcess(
         val android = try {
             Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
         } catch (e: Exception) {
-            Log.w(TAG, "ANDROID_ID unavailable: ${e.message}"); null
+            Log.w(TAG, "ANDROID_ID unavailable: ${e.message}")
+            null
         }
         val suffix = android?.takeIf { it.isNotBlank() }?.take(8) ?: persistedTapSuffix()
         return tech.capullo.audio.calibration.SyncCalibrator.REFERENCE_TAP_PREFIX + suffix

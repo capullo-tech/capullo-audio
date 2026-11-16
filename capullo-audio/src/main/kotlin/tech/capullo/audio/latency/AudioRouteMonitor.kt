@@ -76,8 +76,7 @@ public class AudioRouteMonitor(
         }
     }
 
-    private fun bluetoothAddress(device: AudioDeviceInfo): String =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) device.address?.trim().orEmpty() else ""
+    private fun bluetoothAddress(device: AudioDeviceInfo): String = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) device.address?.trim().orEmpty() else ""
 
     private fun priority(type: Int): Int = when {
         isBluetooth(type) -> 3

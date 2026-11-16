@@ -18,9 +18,13 @@ class VolumeUndoTest {
 
     private class MemoryUndo : VolumeUndo {
         var stored: Map<String, Int>? = null
-        override fun save(previous: Map<String, Int>) { stored = previous }
+        override fun save(previous: Map<String, Int>) {
+            stored = previous
+        }
         override fun load(): Map<String, Int>? = stored
-        override fun clear() { stored = null }
+        override fun clear() {
+            stored = null
+        }
     }
 
     private class RecordingControl : CalibrationControl {

@@ -97,8 +97,12 @@ class WienerLevelTest {
         return FloatArray(mic.size) { i ->
             val t = i / 1000.0
             walk = 0.999 * walk + rnd.nextDouble() * 2 - 1
-            (mic[i] + level * (0.02 * walk + kotlin.math.sin(2 * Math.PI * 3.0 * t) +
-                0.7 * kotlin.math.sin(2 * Math.PI * 11.0 * t))).toFloat()
+            (
+                mic[i] + level * (
+                    0.02 * walk + kotlin.math.sin(2 * Math.PI * 3.0 * t) +
+                        0.7 * kotlin.math.sin(2 * Math.PI * 11.0 * t)
+                    )
+                ).toFloat()
         }
     }
 
@@ -181,8 +185,10 @@ class WienerLevelTest {
                 val m12 = sensitivity(ref, -12, eps)
                 println(
                     "%-11s %-8s %-9s %-9s".format(
-                        name, eps?.toString() ?: "none(raw)",
-                        "%+.2f".format(m6), "%+.2f".format(m12),
+                        name,
+                        eps?.toString() ?: "none(raw)",
+                        "%+.2f".format(m6),
+                        "%+.2f".format(m12),
                     ),
                 )
                 // Also report how much of the deconvolution goes NEGATIVE. A level array that is
@@ -226,12 +232,18 @@ class WienerLevelTest {
             print("%-9s".format(noise.toString()))
             for (eps in epsValues) {
                 val base = deltaDb(
-                    ref, room(ref, listOf(1200 to 1.0f, 1400 to 1.0f), noise = noise, seed = 9),
-                    1200, 1400, eps,
+                    ref,
+                    room(ref, listOf(1200 to 1.0f, 1400 to 1.0f), noise = noise, seed = 9),
+                    1200,
+                    1400,
+                    eps,
                 )
                 val got = deltaDb(
-                    ref, room(ref, listOf(1200 to 1.0f, 1400 to 0.2512f), noise = noise, seed = 9),
-                    1200, 1400, eps,
+                    ref,
+                    room(ref, listOf(1200 to 1.0f, 1400 to 0.2512f), noise = noise, seed = 9),
+                    1200,
+                    1400,
+                    eps,
                 )
                 print("%-9s".format("%+.2f".format(got - base)))
             }
@@ -324,8 +336,7 @@ class WienerLevelTest {
 
         // A baseline shows up as a profile whose MEAN over a wide quiet span is comparable to its
         // arrivals, instead of ~0. That is the defect itself, before any question of readout.
-        fun meanOver(r: DoubleArray, fromMs: Int, toMs: Int) =
-            (fromMs until toMs).sumOf { r[it] } / (toMs - fromMs)
+        fun meanOver(r: DoubleArray, fromMs: Int, toMs: Int) = (fromMs until toMs).sumOf { r[it] } / (toMs - fromMs)
         val baseUncut = abs(meanOver(uncut, 1500, 2500))
         val baseCut = abs(meanOver(cut, 1500, 2500))
         assertTrue(

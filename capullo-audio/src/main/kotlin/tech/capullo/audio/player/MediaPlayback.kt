@@ -44,11 +44,10 @@ internal interface MediaPlayback {
 
 /** Adapts a neutral [MediaRequest] into a Media3 [MediaItem] - the one place Media3 meets the SPI. */
 @UnstableApi
-internal fun MediaRequest.toMediaItem(): MediaItem =
-    MediaItem.Builder()
-        .setUri(uri)
-        .apply { mimeType?.let { setMimeType(it) } }
-        .build()
+internal fun MediaRequest.toMediaItem(): MediaItem = MediaItem.Builder()
+    .setUri(uri)
+    .apply { mimeType?.let { setMimeType(it) } }
+    .build()
 
 /**
  * The real [MediaPlayback]: an ExoPlayer whose PCM is teed into the snapserver FIFO via
@@ -78,7 +77,10 @@ internal class ExoMediaPlayback(
         releasePlayer()
 
         // Open the FIFO write end (O_RDWR) before the player starts - parity with the sink docs.
-        val sink = FifoAudioBufferSink(fifoPath).also { fifoSink = it; it.open() }
+        val sink = FifoAudioBufferSink(fifoPath).also {
+            fifoSink = it
+            it.open()
+        }
 
         // Tuned for flaky internet radio: cross-protocol redirects, generous timeouts, and any
         // per-request headers the source supplied (e.g. auth'd streams) via MediaRequest.headers.
@@ -122,7 +124,9 @@ internal class ExoMediaPlayback(
     override fun release() = releasePlayer()
 
     private fun releasePlayer() {
-        exoPlayer?.release(); exoPlayer = null
-        fifoSink?.close(); fifoSink = null
+        exoPlayer?.release()
+        exoPlayer = null
+        fifoSink?.close()
+        fifoSink = null
     }
 }

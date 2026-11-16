@@ -95,7 +95,10 @@ class LoudnessProcessorsTest {
         val rate = 48_000
         val pcm = sine(rate, -28.0, 70.0)
         val click = (32767 * 10.0.pow(-1.5 / 20)).toInt().toShort()
-        for (s in 0 until 70) { pcm[s * rate * 2] = click; pcm[s * rate * 2 + 1] = click }
+        for (s in 0 until 70) {
+            pcm[s * rate * 2] = click
+            pcm[s * rate * 2 + 1] = click
+        }
         val (a, g) = agc()
         run(a, pcm, rate)
         val cap = 0.89f * 32767f / click
@@ -128,12 +131,14 @@ class LoudnessProcessorsTest {
         val (a, g) = agc()
         run(a, sine(48_000, -30.0, 70.0), 48_000)
         assertTrue(g.gain > 1.9f)
-        a.configure(format(48_000)); a.flush()
+        a.configure(format(48_000))
+        a.flush()
         assertEquals(1f, g.gain, 0f)
         run(a, sine(48_000, -6.0, 40.0), 48_000)
         val cut = g.gain
         assertTrue("expected a cut, got $cut", cut < 1f)
-        a.configure(format(48_000)); a.flush()
+        a.configure(format(48_000))
+        a.flush()
         assertEquals(cut, g.gain, 0f)
     }
 

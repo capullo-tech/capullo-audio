@@ -31,12 +31,10 @@ class ProbeSetTest {
      *  a quiet arrival sits 13-15 dB above the loud speaker's tail (FINDINGS §20). */
     private val tailClearanceMs = 380
 
-    private fun pairwiseDiffs(set: List<Int>): List<Int> =
-        set.sorted().let { s -> s.indices.flatMap { i -> (i + 1 until s.size).map { j -> s[j] - s[i] } } }
+    private fun pairwiseDiffs(set: List<Int>): List<Int> = set.sorted().let { s -> s.indices.flatMap { i -> (i + 1 until s.size).map { j -> s[j] - s[i] } } }
 
     /** Sidon (B_2): all pairwise differences distinct, so no shifted grid masquerades as another. */
-    private fun isSidon(set: List<Int>): Boolean =
-        pairwiseDiffs(set).let { it.size == it.toSet().size }
+    private fun isSidon(set: List<Int>): Boolean = pairwiseDiffs(set).let { it.size == it.toSet().size }
 
     private fun union(set: List<Int>): List<Int> = (set + pairwiseDiffs(set)).distinct().sorted()
 

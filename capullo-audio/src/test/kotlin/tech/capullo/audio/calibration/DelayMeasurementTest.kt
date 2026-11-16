@@ -222,13 +222,12 @@ class DelayMeasurementTest {
         // compares whichever sidelobe each search happened to keep, which says nothing about
         // whether the speakers were found.
         val (snap, mic) = scene(delayAMs = 1200, delayBMs = 1250)
-        fun strongestTwo(sources: Int) =
-            DelayMeasurement.estimateSpeakerDelays(snap, mic, peakCount = 8, sources = sources)
-                .filter { it.z >= 9.0 }
-                .sortedByDescending { it.z }
-                .take(2)
-                .map { it.lagMs }
-                .sorted()
+        fun strongestTwo(sources: Int) = DelayMeasurement.estimateSpeakerDelays(snap, mic, peakCount = 8, sources = sources)
+            .filter { it.z >= 9.0 }
+            .sortedByDescending { it.z }
+            .take(2)
+            .map { it.lagMs }
+            .sorted()
         val plain = strongestTwo(0)
         val perSource = strongestTwo(2)
         assertEquals("both searches must recover the same two speakers", plain[0], perSource[0], 2.0)

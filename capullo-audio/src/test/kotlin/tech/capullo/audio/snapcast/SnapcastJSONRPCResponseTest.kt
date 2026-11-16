@@ -20,8 +20,7 @@ class SnapcastJSONRPCResponseTest {
     // Mirrors the client's decode config (ignoreUnknownKeys).
     private val json = Json { ignoreUnknownKeys = true }
 
-    private fun decode(raw: String): SnapcastJSONRPCResponse =
-        json.decodeFromString(SnapcastJSONRPCResponseSerializer, raw)
+    private fun decode(raw: String): SnapcastJSONRPCResponse = json.decodeFromString(SnapcastJSONRPCResponseSerializer, raw)
 
     @Test
     fun `SetLatency reply decodes as generic success with its result intact`() {
@@ -42,7 +41,7 @@ class SnapcastJSONRPCResponseTest {
     @Test
     fun `error reply decodes with code and message`() {
         val response = decode(
-            """{"id":4,"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal error"}}"""
+            """{"id":4,"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal error"}}""",
         )
         val error = response as SnapcastErrorResponse
         assertEquals(4, error.id)
@@ -53,7 +52,7 @@ class SnapcastJSONRPCResponseTest {
     @Test
     fun `error reply with null id decodes`() {
         val response = decode(
-            """{"id":null,"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"}}"""
+            """{"id":null,"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"}}""",
         )
         assertNull((response as SnapcastErrorResponse).id)
     }
@@ -77,7 +76,7 @@ class SnapcastJSONRPCResponseTest {
     @Test
     fun `notifications still route through the method-based selector`() {
         val response = decode(
-            """{"jsonrpc":"2.0","method":"Client.OnLatencyChanged","params":{"id":"abc","latency":5}}"""
+            """{"jsonrpc":"2.0","method":"Client.OnLatencyChanged","params":{"id":"abc","latency":5}}""",
         )
         val notification = response as ClientOnLatencyChanged
         assertEquals("abc", notification.params.clientId)
