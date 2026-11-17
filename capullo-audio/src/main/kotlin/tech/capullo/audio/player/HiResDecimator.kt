@@ -1,12 +1,14 @@
 package tech.capullo.audio.player
 
 import androidx.media3.common.C
+import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.AudioProcessor.AudioFormat
 import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
 import kotlin.math.PI
 import kotlin.math.ceil
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -19,7 +21,13 @@ import kotlin.math.sqrt
  * 96k/192k/384k -> 48k, 88.2k/176.4k/352.8k -> 44.1k (Sonic then upsamples to 48k, which cannot alias).
  * Kaiser-windowed sinc, ~80 dB stopband from the output Nyquist; only output frames are computed.
  *
- * Inactive (pass-through) for rates <= 48k, non-integer ratios, and non-16-bit PCM.
+ * Inactive (pass-through) for rates <= 48k and non-16-bit PCM. Rates above 48k that are not an
+ * integer multiple of 48k or 44.1k (e.g. 50k, 64k) are also passed through, so they keep Sonic's
+ * unfiltered downsampling and can still alias.
+ *
+ * Latency: the filter adds a constant group delay of (taps - 1) / 2 input frames (121 frames,
+ * ~0.63 ms at 192k) ahead of the snapcast calibration offset whenever it is active. There is no
+ * end-of-stream drain, so each track drops that tail plus up to (factor - 1) input frames.
  */
 @UnstableApi
 class HiResDecimator : BaseAudioProcessor() {
@@ -71,7 +79,7 @@ class HiResDecimator : BaseAudioProcessor() {
                     val start = ch * 2 * n + pos + 1
                     var acc = 0f
                     for (k in 0 until n) acc += taps[k] * history[start + k]
-                    output.putShort(acc.toInt().coerceIn(-32768, 32767).toShort())
+                    output.putShort(acc.roundToInt().coerceIn(-32768, 32767).toShort())
                 }
             }
             pos = if (pos + 1 == n) 0 else pos + 1
@@ -81,7 +89,7 @@ class HiResDecimator : BaseAudioProcessor() {
         output.flip()
     }
 
-    override fun onFlush() {
+    override fun onFlush(streamMetadata: AudioProcessor.StreamMetadata) {
         factor = pendingFactor
         channels = pendingChannels
         taps = pendingTaps

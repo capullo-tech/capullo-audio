@@ -32,7 +32,10 @@ class FixedRateResampler(private val outputSampleRateHz: Int) : AudioProcessor {
     override fun queueEndOfStream() = sonic.queueEndOfStream()
     override fun getOutput(): ByteBuffer = sonic.output
     override fun isEnded(): Boolean = sonic.isEnded
-    override fun flush() = sonic.flush()
+
+    @Deprecated("Use flush(StreamMetadata)", ReplaceWith("flush(AudioProcessor.StreamMetadata.DEFAULT)"))
+    override fun flush() = sonic.flush(AudioProcessor.StreamMetadata.DEFAULT)
+
     override fun flush(streamMetadata: AudioProcessor.StreamMetadata) = sonic.flush(streamMetadata)
     override fun reset() = sonic.reset()
     override fun getDurationAfterProcessorApplied(durationUs: Long): Long = sonic.getDurationAfterProcessorApplied(durationUs)
