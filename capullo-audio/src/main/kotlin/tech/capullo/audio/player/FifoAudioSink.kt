@@ -4,8 +4,6 @@ import android.content.Context
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
-import androidx.media3.common.audio.ChannelMixingAudioProcessor
-import androidx.media3.common.audio.ChannelMixingMatrix
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.audio.AudioSink
@@ -17,7 +15,7 @@ import java.nio.ByteBuffer
 
 /**
  * Receives the decoded PCM from the TeeAudioProcessor (already forced to
- * 48000 Hz / 16-bit / stereo by the processor chain in [FifoRenderersFactory])
+ * [FifoFormat] by [FifoFormat.stage] in [FifoRenderersFactory])
  * and writes it into the snapserver FIFO.
  *
  * The FIFO is opened O_RDWR, like VLC's sout file module did: O_RDWR on a
@@ -89,8 +87,8 @@ class FifoAudioBufferSink(
     @Volatile private var priming = false
     private var silenceThread: Thread? = null
 
-    // 40ms of the guaranteed 48000Hz/16-bit/stereo format (LOCKSTEP with SnapserverProcess) = 1920 frames * 4 bytes.
-    private val silence = ByteArray(48000 * SILENCE_CHUNK_MS / 1000 * 2 * 2)
+    // 40ms of the guaranteed FifoFormat = 1920 frames * 4 bytes.
+    private val silence = ByteArray(FifoFormat.SAMPLE_RATE_HZ * SILENCE_CHUNK_MS / 1000 * FifoFormat.BYTES_PER_FRAME)
 
     fun enableWrites() {
         writeEnabled = true
@@ -162,9 +160,12 @@ class FifoAudioBufferSink(
     }
 
     // --- Pause gate (see PcmPauseGate) ---
-    // Guarded by writeLock. 2 s of 48 kHz stereo 16-bit: far more than the few hundred ms the
-    // player still pushes after a pause.
-    private val pauseGate = PcmPauseGate(capacityBytes = 48_000 * 4 * 2, fadeBytes = 48_000 * 4 * FADE_MS / 1000)
+    // Guarded by writeLock. 2 s of FifoFormat PCM: far more than the few hundred ms the player
+    // still pushes after a pause.
+    private val pauseGate = PcmPauseGate(
+        capacityBytes = FifoFormat.SAMPLE_RATE_HZ * FifoFormat.BYTES_PER_FRAME * 2,
+        fadeBytes = FifoFormat.SAMPLE_RATE_HZ * FifoFormat.BYTES_PER_FRAME * FADE_MS / 1000,
+    )
 
     // The user-visible pause state. Both setters are lock-free: writeLock is held across blocking
     // FIFO writes, and these are called from the main thread. The gate itself is only touched on
@@ -192,7 +193,7 @@ class FifoAudioBufferSink(
     }
 
     override fun flush(sampleRateHz: Int, channelCount: Int, encoding: Int) {
-        // Called on (re)configure and on seek/stop - the chain guarantees 48000/2ch/16-bit here.
+        // Called on (re)configure and on seek/stop - the chain guarantees FifoFormat here.
         // Anything held from before the flush belongs to a position the player has left.
         synchronized(writeLock) {
             pauseGate.discard()
@@ -255,7 +256,7 @@ class FifoAudioBufferSink(
 
 /**
  * DefaultRenderersFactory whose audio sink chain is:
- *   [ChannelMixing → 2ch] → [Sonic resample → 48000] → [Tee → FIFO] → AudioTrack
+ *   [FifoFormat.stage → 48000:16:2] → [Tee → FIFO] → AudioTrack
  *
  * The AudioTrack output stays (it paces playback and provides the position
  * clock) but PlaybackService sets player volume to 0 - local audio comes from
@@ -265,10 +266,6 @@ class FifoAudioBufferSink(
  * EXTENSION_RENDERER_MODE_ON prefers platform MediaCodec decoders and falls
  * back to the bundled FFmpeg decoders (lib-media3-ffmpeg-android, loaded
  * reflectively off the classpath) for anything exotic.
- *
- * Limitation: only mono and stereo inputs are mapped (covers radio streams);
- * a >2-channel stream would fail to configure. Add explicit downmix matrices
- * here if that ever happens in the wild.
  */
 @UnstableApi
 class FifoRenderersFactory(
@@ -284,25 +281,10 @@ class FifoRenderersFactory(
         context: Context,
         enableFloatOutput: Boolean,
         enableAudioTrackPlaybackParams: Boolean,
-    ): AudioSink? {
-        val mixer = ChannelMixingAudioProcessor().apply {
-            putChannelMixingMatrix(ChannelMixingMatrix.create(1, 2))
-            putChannelMixingMatrix(ChannelMixingMatrix.create(2, 2))
-        }
-        // LOCKSTEP with SnapserverProcess.SAMPLE_FORMAT (48000) - the FIFO is read at that rate.
-        // FixedRateResampler, not a bare SonicAudioProcessor: the latter forgets its target on reset.
-        val resampler = FixedRateResampler(48000)
-        return DefaultAudioSink.Builder(context)
-            .setEnableFloatOutput(false) // keep the chain in 16-bit PCM
-            .setAudioProcessorChain(
-                DefaultAudioSink.DefaultAudioProcessorChain(
-                    mixer,
-                    // Anti-alias low-pass for >48k input; Sonic has none.
-                    HiResDecimator(),
-                    resampler,
-                    TeeAudioProcessor(fifoSink),
-                ),
-            )
-            .build()
-    }
+    ): AudioSink? = DefaultAudioSink.Builder(context)
+        .setEnableFloatOutput(false) // keep the chain in 16-bit PCM
+        .setAudioProcessorChain(
+            DefaultAudioSink.DefaultAudioProcessorChain(*FifoFormat.stage(), TeeAudioProcessor(fifoSink)),
+        )
+        .build()
 }

@@ -4,8 +4,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * Ring buffer of the broadcast reference PCM, fed from the FIFO tee (48 kHz / 16-bit /
- * stereo, LOCKSTEP with SnapserverProcess) and stored as 48 kHz mono float. Armed only
+ * Ring buffer of the broadcast reference PCM, fed from the FIFO tee (48 kHz / 16-bit / stereo,
+ * [tech.capullo.audio.player.FifoFormat]) and stored as 48 kHz mono float. Armed only
  * while a calibration runs; writes are cheap enough for the playback thread.
  *
  * The ring records [lastWriteNanos] so a mic capture can be coarsely aligned to ring
