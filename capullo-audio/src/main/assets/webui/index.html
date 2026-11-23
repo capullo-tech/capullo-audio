@@ -386,7 +386,7 @@ header{
 
 // Bump on every webui change - shown in debug panel so a stale browser cache
 // is immediately visible (Android Chrome heuristically caches this page).
-const UI_VERSION = 'v33';
+const UI_VERSION = 'v34';
 function lsGet(k) { try { return localStorage.getItem(k); } catch(_) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch(_) {} }
 
@@ -1706,7 +1706,8 @@ function qrMatrix(text) {
 }
 
 $('qr-btn').onclick = () => {
-  const url = location.origin + '/';
+  // The join URL (JoinUrl.kt): opens this player in any browser, or one of our apps.
+  const url = location.origin + '/join/';
   const q = qrMatrix(url);
   if (!q) return;
   const ov = document.createElement('div'); ov.id = 'qrov';

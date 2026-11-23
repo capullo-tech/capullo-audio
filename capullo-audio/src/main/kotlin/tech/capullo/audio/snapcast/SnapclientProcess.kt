@@ -79,11 +79,17 @@ class SnapclientProcess(private val context: Context) {
         return localHostId(context)
     }
 
+    /**
+     * [scheme] `tcp` dials the raw stream port; `ws`/`wss` dial snapserver's HTTP port and stream over
+     * its `/stream` websocket, the only way through the HTTPS tunnel. A joined station passes its
+     * [JoinTarget.scheme], [JoinTarget.host] and [JoinTarget.port].
+     */
     suspend fun start(
         snapserverAddress: String = "localhost",
         snapserverPort: Int = 1604,
         audioChannel: String = "stereo",
         freshId: Boolean = false,
+        scheme: String = "tcp",
     ) = coroutineScope {
         val hostId = loadHostId(freshId)
         val pb = ProcessBuilder().command(
@@ -93,7 +99,7 @@ class SnapclientProcess(private val context: Context) {
             "--sampleformat", sampleFormat,
             "--logfilter", "*:info,Stats:debug",
             "--channel", audioChannel,
-            "tcp://$snapserverAddress:$snapserverPort",
+            "$scheme://$snapserverAddress:$snapserverPort",
         )
 
         val env = pb.environment()

@@ -21,6 +21,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import tech.capullo.audio.snapcast.JoinUrl
 
 data class LocalIp(val label: String, val address: String)
 
@@ -88,6 +89,25 @@ private fun shareText(context: Context, text: String) {
     context.startActivity(Intent.createChooser(send, "Share listening address"))
 }
 
+// The tunnel's base URL (https://<host>) as its join URL; an unparsable URL is shown as-is.
+private fun publicJoinUrl(base: String): String = try {
+    val u = java.net.URI(base)
+    val https = u.scheme.equals("https", ignoreCase = true)
+    JoinUrl.build(
+        u.host,
+        if (u.port != -1) {
+            u.port
+        } else if (https) {
+            443
+        } else {
+            80
+        },
+        https,
+    )
+} catch (e: Exception) {
+    base
+}
+
 // Single floating QR dialog for the web-player address. With a public link available it is
 // segmented: "On this network" (LAN addresses, chip row toggles interfaces) vs "Public link"
 // (zero-install tunnel URL). With no public link it renders the plain LAN dialog; with no LAN
@@ -115,7 +135,7 @@ fun ListenQrDialog(
     // The sheet's QR icon is a local-sharing gesture, so LAN stays the default unless there is none.
     var publicSelected by remember { mutableStateOf(ips.isEmpty() && hasPublic) }
     var selected by remember(ips) { mutableStateOf(initial?.takeIf { it in ips } ?: ips.firstOrNull()) }
-    val lanUrl = selected?.let { "http://${it.address}:$httpPort" }
+    val lanUrl = selected?.let { JoinUrl.build(it.address, httpPort) }
 
     val title = when {
         hasPublic && publicSelected -> "Listen anywhere"
@@ -206,8 +226,8 @@ private fun LanContent(
     Spacer(Modifier.height(12.dp))
     Text(url, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
     Text(
-        "Scan with the other device's camera to open the web player - " +
-            "pick the network the other device is on.",
+        "Scan with the other device's camera to open the web player, or a capullo app if " +
+            "installed - pick the network the other device is on.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -217,7 +237,7 @@ private fun LanContent(
 private fun PublicLinkContent(publicLink: PublicLinkState) {
     when (publicLink) {
         is PublicLinkState.Active -> {
-            val url = publicLink.url
+            val url = publicJoinUrl(publicLink.url)
             val context = LocalContext.current
             val clipboard = LocalClipboardManager.current
             qrBitmap(url)?.let {

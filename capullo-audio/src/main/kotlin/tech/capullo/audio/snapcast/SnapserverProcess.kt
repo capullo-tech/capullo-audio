@@ -81,14 +81,19 @@ class SnapserverProcess(
         writeListenInfo()
     }
 
+    // The served pages: the web player, and the join URL's landing page ([JoinUrl]) with the app list
+    // filled in. snapserver serves nested doc_root directories and maps a target ending in '/' to that
+    // directory's index.html, so join/index.html answers `/join/`.
     private fun copyWebUiAsset() {
+        val webuiDir = docRoot(context)
         try {
-            val webuiDir = docRoot(context).apply { mkdirs() }
+            webuiDir.mkdirs()
             context.assets.open("webui/index.html").use { input ->
-                File(webuiDir, "index.html").outputStream().use { output ->
-                    input.copyTo(output)
-                }
+                File(webuiDir, "index.html").outputStream().use { output -> input.copyTo(output) }
             }
+            val join = context.assets.open("webui/join/index.html").use { it.readBytes().decodeToString() }
+            File(webuiDir, "join").mkdirs()
+            File(webuiDir, "join/index.html").writeText(JoinUrl.landingPage(join))
         } catch (e: Exception) {
             Log.e(TAG, "Failed to copy WebUI: ${e.message}")
         }
