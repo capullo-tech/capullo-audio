@@ -1,6 +1,5 @@
 package tech.capullo.audio.snapcast
 
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -13,14 +12,12 @@ import org.junit.Test
  * Regression tests for response decoding: the serializer used to select ServerGetStatusResponse
  * for EVERY request-response, so SetLatency ({"latency":N}) and Stream.Control ("ok") replies —
  * and all error responses — threw instead of decoding (the on-device
- * "Field 'server' is required" / "Expected JsonObject" failures).
+ * "Field 'server' is required" / "Expected JsonObject" failures, capullo-audio#1).
+ * Decodes through [decodeSnapcastResponse], the exact path [SnapcastControlClient] uses per frame.
  */
 class SnapcastJSONRPCResponseTest {
 
-    // Mirrors the client's decode config (ignoreUnknownKeys).
-    private val json = Json { ignoreUnknownKeys = true }
-
-    private fun decode(raw: String): SnapcastJSONRPCResponse = json.decodeFromString(SnapcastJSONRPCResponseSerializer, raw)
+    private fun decode(raw: String): SnapcastJSONRPCResponse = decodeSnapcastResponse(raw)
 
     @Test
     fun `SetLatency reply decodes as generic success with its result intact`() {
@@ -71,6 +68,22 @@ class SnapcastJSONRPCResponseTest {
         assertEquals(1, response.id)
         assertEquals("Snapserver", response.result.server.server.snapserver.name)
         assertTrue(response.result.server.groups.isEmpty())
+    }
+
+    @Test
+    fun `GetStatus reply with unmodeled stream query keys keeps its streams`() {
+        val host = """{"arch":"arm64","ip":"192.168.1.2","mac":"00:11:22:33:44:55","name":"oppo","os":"Android"}"""
+        val query = """{"chunk_ms":"20","codec":"flac","controlscript":"meta_mpd.py","dryout_ms":"2000","mode":"create","name":"default","sampleformat":"48000:16:2"}"""
+        val raw = """
+            {"id":2,"jsonrpc":"2.0","result":{"server":{
+                "groups":[],
+                "server":{"host":$host,"snapserver":{"controlProtocolVersion":1,"name":"Snapserver","protocolVersion":1,"version":"0.34.0"}},
+                "streams":[{"id":"default","properties":{},"status":"playing","uri":{
+                    "fragment":"","host":"","path":"/tmp/snapfifo","query":$query,"raw":"pipe:///tmp/snapfifo","scheme":"pipe"}}]
+            }}}
+        """.trimIndent()
+        val response = decode(raw) as ServerGetStatusResponse
+        assertEquals("default", response.result.server.streams.single().id)
     }
 
     @Test
