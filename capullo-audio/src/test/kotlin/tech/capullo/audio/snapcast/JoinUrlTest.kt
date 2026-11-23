@@ -1,8 +1,11 @@
 package tech.capullo.audio.snapcast
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class JoinUrlTest {
 
@@ -99,5 +102,39 @@ class JoinUrlTest {
             "not a url",
             "",
         ).forEach { assertNull(it, JoinUrl.parse(it)) }
+    }
+
+    @Test
+    fun `intentLink opens the LAN join URL in the named app and falls back to the player root`() {
+        assertEquals(
+            "intent://192.168.1.20:40002/join/#Intent;scheme=http;package=tech.capullo.quantumcast;" +
+                "S.browser_fallback_url=http%3A%2F%2F192.168.1.20%3A40002%2F;end",
+            JoinUrl.intentLink(JoinTarget("192.168.1.20", 40002, false), JoinUrl.PACKAGE_QUANTUMCAST),
+        )
+    }
+
+    @Test
+    fun `intentLink keeps the tunnel form portless and brackets IPv6`() {
+        assertEquals(
+            "intent://quiet-river-blue-fox.trycloudflare.com/join/#Intent;scheme=https;" +
+                "package=tech.capullo.tubecapullo;" +
+                "S.browser_fallback_url=https%3A%2F%2Fquiet-river-blue-fox.trycloudflare.com%2F;end",
+            JoinUrl.intentLink(
+                JoinUrl.parse("https://quiet-river-blue-fox.trycloudflare.com/join/")!!,
+                JoinUrl.PACKAGE_CAPULLO_TUBE,
+            ),
+        )
+        assertEquals(
+            "intent://[fd7a:115c::1]:40002/join/#Intent;scheme=http;package=tech.capullo.telecloudradio;" +
+                "S.browser_fallback_url=http%3A%2F%2F%5Bfd7a%3A115c%3A%3A1%5D%3A40002%2F;end",
+            JoinUrl.intentLink(JoinTarget("fd7a:115c::1", 40002, false), JoinUrl.PACKAGE_TELECLOUD_RADIO),
+        )
+    }
+
+    @Test
+    fun `the shipped landing page gets every app filled in`() {
+        val page = JoinUrl.landingPage(File("src/main/assets/webui/join/index.html").readText())
+        assertFalse("placeholder left in the page", "/*CAPULLO_APPS*/" in page)
+        JoinUrl.APPS.forEach { assertTrue(it.packageName, "\"pkg\":\"${it.packageName}\"" in page) }
     }
 }

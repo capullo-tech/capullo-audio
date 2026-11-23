@@ -74,10 +74,6 @@ class SnapserverProcess(
         // and its stage() is what produces that PCM, so the two cannot drift apart.
         internal const val SAMPLE_FORMAT = "sampleformat=${FifoFormat.SNAPCAST_SAMPLE_FORMAT}"
         private val TAG = SnapserverProcess::class.java.simpleName
-
-        // Relative to assets/webui and to the doc_root. snapserver serves nested directories and maps
-        // a target ending in '/' to that directory's index.html, so join/index.html answers `/join/`.
-        private val WEBUI_PAGES = listOf("index.html", "join/index.html")
     }
 
     init {
@@ -85,18 +81,21 @@ class SnapserverProcess(
         writeListenInfo()
     }
 
-    // The served pages: the web player and the join URL's landing page ([JoinUrl]).
+    // The served pages: the web player, and the join URL's landing page ([JoinUrl]) with the app list
+    // filled in. snapserver serves nested doc_root directories and maps a target ending in '/' to that
+    // directory's index.html, so join/index.html answers `/join/`.
     private fun copyWebUiAsset() {
         val webuiDir = docRoot(context)
-        for (page in WEBUI_PAGES) {
-            try {
-                val target = File(webuiDir, page).apply { parentFile?.mkdirs() }
-                context.assets.open("webui/$page").use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to copy WebUI $page: ${e.message}")
+        try {
+            webuiDir.mkdirs()
+            context.assets.open("webui/index.html").use { input ->
+                File(webuiDir, "index.html").outputStream().use { output -> input.copyTo(output) }
             }
+            val join = context.assets.open("webui/join/index.html").use { it.readBytes().decodeToString() }
+            File(webuiDir, "join").mkdirs()
+            File(webuiDir, "join/index.html").writeText(JoinUrl.landingPage(join))
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to copy WebUI: ${e.message}")
         }
     }
 

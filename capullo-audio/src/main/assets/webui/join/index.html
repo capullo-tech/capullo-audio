@@ -1,16 +1,50 @@
 <!doctype html>
 <!-- Landing page of the join URL (http://<ip>:<httpPort>/join/, https://<tunnel>/join/; see
-     JoinUrl.kt). Phones with a capullo app catch that URL through an intent-filter; every other
-     browser lands here and goes straight to the web player on the same origin. -->
+     JoinUrl.kt). On Android: one "Open in <app>" intent: link per capullo app (Android 12+ never
+     hands an unverified http link to an app, but an intent: link naming the package works; without
+     the app the browser follows the fallback to the player), plus a link to the player. Elsewhere,
+     or if the app list was not filled in: straight to the web player on the same origin. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="0;url=/">
-<title>Opening player</title>
-<script>location.replace('/');</script>
+<title>Listen to this station</title>
+<noscript><meta http-equiv="refresh" content="0;url=/"></noscript>
+<style>
+body{background:#0D1017;color:#E4E7F2;font-family:system-ui,-apple-system,sans-serif;
+  max-width:360px;margin:0 auto;padding:40px 16px;text-align:center}
+h1{font-size:1.2rem;font-weight:600;margin:0 0 24px}
+a{display:block;margin:12px 0;padding:14px;border-radius:12px;color:inherit;text-decoration:none}
+.app{background:#2A3150}
+.web{border:1px solid #454E75}
+</style>
+<script>
+'use strict';
+// SnapserverProcess fills this from JoinUrl.APPS ([{pkg, label}]) when it installs the page.
+const APPS = /*CAPULLO_APPS*/[];
+if (!/Android/i.test(navigator.userAgent) || !APPS.length) location.replace('/');
+</script>
 </head>
-<body style="background:#0D1017;color:#E4E7F2;font-family:sans-serif">
-<a href="/" style="color:inherit">Open the player</a>
+<body>
+<h1>Listen to this station</h1>
+<div id="apps"></div>
+<a class="web" href="/">Open the web player</a>
+<script>
+'use strict';
+// Same link as JoinUrl.intentLink. The fallback is the bare root: snapserver 404s on a query.
+(function () {
+  const scheme = location.protocol.slice(0, -1);
+  const fallback = encodeURIComponent(location.origin + '/');
+  const box = document.getElementById('apps');
+  for (const a of APPS) {
+    const el = document.createElement('a');
+    el.className = 'app';
+    el.href = 'intent://' + location.host + '/join/#Intent;scheme=' + scheme + ';package=' + a.pkg +
+      ';S.browser_fallback_url=' + fallback + ';end';
+    el.textContent = 'Open in ' + a.label;
+    box.appendChild(el);
+  }
+})();
+</script>
 </body>
 </html>
