@@ -5,6 +5,7 @@ import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonContentPolymorphicSerializer
 import kotlinx.serialization.json.JsonElement
@@ -308,3 +309,12 @@ object SnapcastJSONRPCResponseSerializer : JsonContentPolymorphicSerializer<Snap
         }
     }
 }
+
+// Snapserver includes unknown stream query keys (e.g. controlscript) in GetStatus responses.
+// ignoreUnknownKeys prevents SerializationException → decode failure → empty client list.
+private val snapJson = Json { ignoreUnknownKeys = true }
+
+/** Decodes one control-channel text frame: a notification, an error, or a request response routed
+ *  by result shape (plain `"ok"` acks land in [GenericSuccessResponse], never [ServerStatusResult]).
+ *  [SnapcastControlClient] decodes every frame through here, so tests exercise the real path. */
+internal fun decodeSnapcastResponse(raw: String): SnapcastJSONRPCResponse = snapJson.decodeFromString(SnapcastJSONRPCResponseSerializer, raw)

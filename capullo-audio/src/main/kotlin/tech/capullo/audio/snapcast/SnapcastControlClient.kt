@@ -23,10 +23,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.util.concurrent.TimeUnit
 
-// Snapserver includes unknown stream query keys (e.g. controlscript) in GetStatus responses.
-// ignoreUnknownKeys prevents SerializationException → decode failure → empty client list.
-private val snapJson = Json { ignoreUnknownKeys = true }
-
 class SnapcastControlClient(
     private val snapserverHostAddress: String,
     private val websocketPort: Int = 1680,
@@ -89,7 +85,7 @@ class SnapcastControlClient(
             }
             frame?.readText()?.also { json ->
                 val response = try {
-                    snapJson.decodeFromString(SnapcastJSONRPCResponseSerializer, json)
+                    decodeSnapcastResponse(json)
                 } catch (e: Exception) {
                     Log.d(TAG, "Decode error: $e")
                     null
