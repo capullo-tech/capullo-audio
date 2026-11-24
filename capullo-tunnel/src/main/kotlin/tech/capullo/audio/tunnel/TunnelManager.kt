@@ -20,8 +20,8 @@ import kotlin.math.min
  * Public-link tunnel: forwards the snapserver HTTP port (web player + /stream + /jsonrpc)
  * through a Cloudflare quick tunnel so anyone with the URL can join - no LAN, no install.
  *
- * Driven by the consuming app's playback service from its own tunnel setting + broadcast
- * state; the resolved public URL (random per connection on quick tunnels) is surfaced via
+ * The consuming app's playback service runs it while [requested] is set and a broadcast is
+ * live; the resolved public URL (random per connection on quick tunnels) is surfaced via
  * [state] for the public-link dialog.
  *
  * No DI framework here on purpose - the library uses plain constructors throughout, so an app
@@ -39,6 +39,21 @@ class TunnelManager(private val context: Context) {
 
     private val _state = MutableStateFlow<TunnelState>(TunnelState.Off)
     val state: StateFlow<TunnelState> = _state.asStateFlow()
+
+    private val _requested = MutableStateFlow(false)
+
+    /**
+     * Whether the user asked for a public link. It sits here because this singleton is the one
+     * object the UI that sets it and the playback service that gates [start] on it already
+     * share. In memory on purpose: a world-reachable link is opened by asking for it in the QR
+     * dialog, never by a setting that outlives the process. The service clears it when it dies
+     * and when the device starts listening to another station.
+     */
+    val requested: StateFlow<Boolean> = _requested.asStateFlow()
+
+    fun setRequested(requested: Boolean) {
+        _requested.value = requested
+    }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null

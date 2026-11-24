@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
@@ -108,20 +109,28 @@ private fun publicJoinUrl(base: String): String = try {
     base
 }
 
-// Single floating QR dialog for the web-player address. With a public link available it is
-// segmented: "On this network" (LAN addresses, chip row toggles interfaces) vs "Public link"
-// (zero-install tunnel URL). With no public link it renders the plain LAN dialog; with no LAN
-// address at all it shows the "check Wi-Fi/hotspot/VPN" note instead.
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+// Single floating QR dialog for the web-player address. One chip row picks how the listener
+// reaches this device: a chip per local network (Wi-Fi, hotspot, Ethernet, VPN) and, when the
+// app can open one, "Cloudflare" for the zero-install public link. Picking Cloudflare is what
+// turns the link on, and it stays on while another chip shows its QR, until "Turn off". With
+// nothing to offer at all it shows the "check Wi-Fi/hotspot/VPN" note.
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ListenQrDialog(
     ips: List<LocalIp>,
     httpPort: Int,
     initial: LocalIp? = null,
     publicLink: PublicLinkState = PublicLinkState.Off,
+    // Turns the public link on (true) or off (false); called again for a link that is already
+    // on. Null: the app has no tunnel, or this device is not broadcasting right now. The
+    // Cloudflare chip is then offered only for a link that is on, without its "Turn off".
+    onSetPublicLink: ((Boolean) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
-    if (ips.isEmpty() && publicLink is PublicLinkState.Off) {
+    val linkOn = publicLink !is PublicLinkState.Off
+    // A link that is on always has its chip: it must never be exposed and missing from here.
+    val offerCloudflare = onSetPublicLink != null || linkOn
+    if (ips.isEmpty() && !offerCloudflare) {
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text("No network detected") },
@@ -131,15 +140,22 @@ fun ListenQrDialog(
         return
     }
 
-    val hasPublic = publicLink !is PublicLinkState.Off
-    // The sheet's QR icon is a local-sharing gesture, so LAN stays the default unless there is none.
-    var publicSelected by remember { mutableStateOf(ips.isEmpty() && hasPublic) }
     var selected by remember(ips) { mutableStateOf(initial?.takeIf { it in ips } ?: ips.firstOrNull()) }
-    val lanUrl = selected?.let { JoinUrl.build(it.address, httpPort) }
+    // A link that is already on opens on its own chip: sharing it again or turning it off is what
+    // the broadcaster most likely came back for.
+    var cloudflarePicked by remember { mutableStateOf(linkOn) }
+    // The link went off under the dialog (broadcast ended, turned off elsewhere): back to the
+    // local networks rather than a pane that waits for a link nobody is starting.
+    LaunchedEffect(linkOn) { if (!linkOn) cloudflarePicked = false }
+    val showCloudflare = offerCloudflare && cloudflarePicked
+    val lan = selected.takeIf { !showCloudflare }
+    val lanUrl = lan?.let { JoinUrl.build(it.address, httpPort) }
 
+    // One name per chip, the same in the title: a second name for the public link ("Listen
+    // anywhere" next to a "Public link" setting) read as two different features.
     val title = when {
-        hasPublic && publicSelected -> "Listen anywhere"
-        selected != null -> "Listen via ${selected!!.label}"
+        showCloudflare -> "Listen via Cloudflare"
+        lan != null -> "Listen via ${lan.label}"
         else -> "Listen"
     }
 
@@ -148,29 +164,49 @@ fun ListenQrDialog(
         title = { Text(title) },
         text = {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                if (hasPublic) {
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        SegmentedButton(
-                            selected = !publicSelected,
-                            onClick = { publicSelected = false },
-                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                        ) { Text("On this network") }
-                        SegmentedButton(
-                            selected = publicSelected,
-                            onClick = { publicSelected = true },
-                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                        ) { Text("Public link") }
+                if (offerCloudflare || ips.size > 1) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        ips.forEach { ip ->
+                            FilterChip(
+                                selected = ip == lan,
+                                onClick = {
+                                    selected = ip
+                                    cloudflarePicked = false
+                                },
+                                label = { Text(ip.label) },
+                            )
+                        }
+                        if (offerCloudflare) {
+                            FilterChip(
+                                selected = showCloudflare,
+                                onClick = {
+                                    cloudflarePicked = true
+                                    onSetPublicLink?.invoke(true)
+                                },
+                                label = { Text("Cloudflare") },
+                                // Still up while another chip shows its QR - keep that visible.
+                                leadingIcon = if (linkOn) {
+                                    {
+                                        Icon(
+                                            Icons.Default.Cloud,
+                                            contentDescription = "Public link is on",
+                                            modifier = Modifier.size(FilterChipDefaults.IconSize),
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
+                            )
+                        }
                     }
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
                 }
                 when {
-                    hasPublic && publicSelected -> PublicLinkContent(publicLink)
-                    selected != null -> LanContent(
-                        ips = ips,
-                        selected = selected!!,
-                        onSelect = { selected = it },
-                        url = lanUrl!!,
-                    )
+                    showCloudflare -> PublicLinkContent(publicLink)
+                    lanUrl != null -> LanContent(lanUrl)
                     else -> Text(
                         NO_IP_NOTE,
                         style = MaterialTheme.typography.bodySmall,
@@ -180,39 +216,28 @@ fun ListenQrDialog(
             }
         },
         confirmButton = {
-            // Public renders its own copy/share icon row in-content; LAN keeps the Share text button.
-            if (!(hasPublic && publicSelected) && lanUrl != null) {
-                val context = LocalContext.current
-                TextButton(onClick = { shareText(context, lanUrl) }) { Text("Share") }
+            // Cloudflare renders its own copy/share icon row in-content; LAN keeps the Share text button.
+            when {
+                showCloudflare -> if (onSetPublicLink != null) {
+                    TextButton(
+                        onClick = {
+                            onSetPublicLink(false)
+                            cloudflarePicked = false
+                        },
+                    ) { Text("Turn off") }
+                }
+                lanUrl != null -> {
+                    val context = LocalContext.current
+                    TextButton(onClick = { shareText(context, lanUrl) }) { Text("Share") }
+                }
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
     )
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun LanContent(
-    ips: List<LocalIp>,
-    selected: LocalIp,
-    onSelect: (LocalIp) -> Unit,
-    url: String,
-) {
-    if (ips.size > 1) {
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            ips.forEach { ip ->
-                FilterChip(
-                    selected = ip == selected,
-                    onClick = { onSelect(ip) },
-                    label = { Text(ip.label) },
-                )
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-    }
+private fun LanContent(url: String) {
     qrBitmap(url)?.let {
         Image(
             bitmap = it.asImageBitmap(),
@@ -259,12 +284,7 @@ private fun PublicLinkContent(publicLink: PublicLinkState) {
                     textAlign = TextAlign.Center,
                 )
             }
-            Text(
-                "Anyone with the link can listen - no app needed.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
+            PublicLinkWarning()
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 IconButton(onClick = { clipboard.setText(AnnotatedString(url)) }) {
@@ -275,7 +295,8 @@ private fun PublicLinkContent(publicLink: PublicLinkState) {
                 }
             }
         }
-        PublicLinkState.Starting -> {
+        // Off: the chip was just picked and the app has not reported the start yet.
+        PublicLinkState.Off, PublicLinkState.Starting -> {
             CircularProgressIndicator()
             Spacer(Modifier.height(12.dp))
             Text(
@@ -283,13 +304,30 @@ private fun PublicLinkContent(publicLink: PublicLinkState) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Spacer(Modifier.height(8.dp))
+            PublicLinkWarning()
         }
-        is PublicLinkState.Error -> Text(
-            "Tunnel error: ${publicLink.message}. Retrying automatically.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error,
-        )
-        // The segmented control is only shown when the link is not Off - unreachable.
-        PublicLinkState.Off -> Unit
+        is PublicLinkState.Error -> {
+            Text(
+                "Tunnel error: ${publicLink.message}. Retrying automatically.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+            Spacer(Modifier.height(8.dp))
+            PublicLinkWarning()
+        }
     }
+}
+
+// In every state of the pane, so it is on screen from the moment the chip is picked, seconds
+// before the link exists and with "Turn off" right below: no settings switch carries it any more.
+@Composable
+private fun PublicLinkWarning() {
+    Text(
+        "Anyone with the link can listen and control - no app needed. " +
+            "About 1.4 Mbps of your upload per listener.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+    )
 }

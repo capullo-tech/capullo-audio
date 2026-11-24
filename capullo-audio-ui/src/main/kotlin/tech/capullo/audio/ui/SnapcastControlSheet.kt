@@ -80,8 +80,11 @@ fun SnapcastControlSheet(
     calibrationRunning: Boolean = false,
     calibrationStatus: String = "",
     httpPort: Int = 1680,
-    // Broadcaster's public (tunnel) link; when not Off the QR dialog gains a "Public link" segment.
+    // Broadcaster's public (tunnel) link, shown by the QR dialog's Cloudflare chip.
     publicLink: PublicLinkState = PublicLinkState.Off,
+    // Turns that link on or off; picking the Cloudflare chip is what calls it. Pass it only
+    // while this device is broadcasting and the app ships a tunnel; null offers no chip.
+    onSetPublicLink: ((Boolean) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val connectedClients = remember(groups) {
@@ -98,7 +101,13 @@ fun SnapcastControlSheet(
     var showQr by remember { mutableStateOf(false) }
     if (showQr) {
         val ips = remember { usefulLocalIps() }
-        ListenQrDialog(ips = ips, httpPort = httpPort, publicLink = publicLink, onDismiss = { showQr = false })
+        ListenQrDialog(
+            ips = ips,
+            httpPort = httpPort,
+            publicLink = publicLink,
+            onSetPublicLink = onSetPublicLink,
+            onDismiss = { showQr = false },
+        )
     }
 
     ModalBottomSheet(
