@@ -10,15 +10,17 @@ import java.net.URLEncoder
  *
  * Both halves of the audience read the same URL. A plain browser opens it against the broadcaster's
  * snapserver HTTP port, whose doc_root serves `join/index.html`: on Android it offers one "Open in
- * <app>" button per [APPS] entry ([intentLink]) next to a link to the web player at `/`; elsewhere it
- * redirects straight to the player (same origin). An app with our snapclient matches the URL with an
- * intent-filter on the `/join` path and hands the URI to [parse], which yields where to point the
- * snapclient.
+ * <app>" button, for the app that is broadcasting ([landingPage], [intentLink]), next to a link to
+ * the web player at `/`; elsewhere it redirects straight to the player (same origin). An app with
+ * our snapclient matches the URL with an intent-filter on the `/join` path and hands the URI to
+ * [parse], which yields where to point the snapclient.
  *
- * The buttons exist because Android 12+ resolves a generic http/https link to an app only for a
+ * The button exists because Android 12+ resolves a generic http/https link to an app only for a
  * verified (App Links) or user-approved domain, and LAN IPs or `*.trycloudflare.com` can't be
  * verified: a scan opens the browser. An `intent:` link that names the package is not generic, so
- * the browser hands it to that app's matching intent-filter.
+ * the browser hands it to that app's matching intent-filter. It names only the broadcaster's own
+ * app: a station is joined from the same app or heard in the web player, never from another
+ * capullo app that happens to be installed.
  *
  * The trailing slash matters: snapserver only maps a target ending in `/` to its `index.html`, and it
  * does not strip query strings, so [build] emits exactly `/join/` with no query.
@@ -33,7 +35,7 @@ object JoinUrl {
     /** An app that joins stations: its applicationId and the name on its landing-page button. */
     data class App(val packageName: String, val label: String)
 
-    /** The apps the landing page offers, in button order. */
+    /** Every app that joins stations. The landing page offers the one that is broadcasting. */
     val APPS = listOf(
         App(PACKAGE_CAPULLO_TUBE, "CapulloTube"),
         App(PACKAGE_QUANTUMCAST, "QuantumCast"),
@@ -64,15 +66,16 @@ object JoinUrl {
     }
 
     /**
-     * The landing page `join/index.html` with [APPS] filled into its [APPS_PLACEHOLDER], so the page
-     * offers exactly the apps this list names. A page left unfilled redirects to the player.
+     * The landing page `join/index.html` for a broadcast by [packageName]: that app, when it is one
+     * of [APPS], filled into the page's [APP_PLACEHOLDER], so its button is the only one offered. For
+     * any other broadcaster the placeholder is left as is and the page redirects to the player.
      */
-    internal fun landingPage(template: String): String = template.replace(
-        APPS_PLACEHOLDER,
-        APPS.joinToString(",", "[", "]") { """{"pkg":"${it.packageName}","label":"${it.label}"}""" },
-    )
+    internal fun landingPage(template: String, packageName: String): String {
+        val app = APPS.firstOrNull { it.packageName == packageName } ?: return template
+        return template.replace(APP_PLACEHOLDER, """{"pkg":"${app.packageName}","label":"${app.label}"}""")
+    }
 
-    private const val APPS_PLACEHOLDER = "/*CAPULLO_APPS*/[]"
+    private const val APP_PLACEHOLDER = "/*CAPULLO_APP*/null"
 
     private fun authority(host: String, port: Int, https: Boolean): String {
         val bare = host.trim().removeSurrounding("[", "]")

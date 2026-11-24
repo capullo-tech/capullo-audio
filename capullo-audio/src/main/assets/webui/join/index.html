@@ -1,49 +1,158 @@
 <!doctype html>
 <!-- Landing page of the join URL (http://<ip>:<httpPort>/join/, https://<tunnel>/join/; see
-     JoinUrl.kt). On Android: one "Open in <app>" intent: link per capullo app (Android 12+ never
-     hands an unverified http link to an app, but an intent: link naming the package works; without
-     the app the browser follows the fallback to the player), plus a link to the player. Elsewhere,
-     or if the app list was not filled in: straight to the web player on the same origin. -->
+     JoinUrl.kt). On Android it shows what is playing and offers exactly one app: the one that is
+     broadcasting. Its button is an intent: link naming that package (Android 12+ never hands an
+     unverified http link to an app, but an intent: link naming the package works), with the web
+     player as the fallback, so a phone without that app lands in the player from the same tap,
+     whatever other capullo apps it has. A page cannot ask Android which apps are installed, and
+     following the link without a tap strands the listener on phones that swallow the launch, so
+     the tap stays. Elsewhere, or when the broadcaster is not an app that joins stations: straight
+     to the web player on the same origin.
+     Self-contained on purpose: the broadcaster's LAN may have no internet. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0D1017">
 <title>Listen to this station</title>
 <noscript><meta http-equiv="refresh" content="0;url=/"></noscript>
-<style>
-body{background:#0D1017;color:#E4E7F2;font-family:system-ui,-apple-system,sans-serif;
-  max-width:360px;margin:0 auto;padding:40px 16px;text-align:center}
-h1{font-size:1.2rem;font-weight:600;margin:0 0 24px}
-a{display:block;margin:12px 0;padding:14px;border-radius:12px;color:inherit;text-decoration:none}
-.app{background:#2A3150}
-.web{border:1px solid #454E75}
-</style>
 <script>
 'use strict';
-// SnapserverProcess fills this from JoinUrl.APPS ([{pkg, label}]) when it installs the page.
-const APPS = /*CAPULLO_APPS*/[];
-if (!/Android/i.test(navigator.userAgent) || !APPS.length) location.replace('/');
+// SnapserverProcess fills this with the broadcasting app ({pkg, label}) when it installs the page
+// (JoinUrl.landingPage); it stays null for a broadcaster that is not one of JoinUrl.APPS.
+const APP = /*CAPULLO_APP*/null;
+if (!/Android/i.test(navigator.userAgent) || !APP) location.replace('/');
 </script>
+<style>
+/* Palette and type of the web player (../index.html). */
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  min-height:100dvh;display:flex;overflow-x:hidden;
+  background:#0D1017;color:#E4E7F2;
+  font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+  -webkit-tap-highlight-color:transparent;
+}
+/* The cover, blurred, as the backdrop. Unset until the art loads. */
+body::before{
+  content:'';position:fixed;inset:-20%;z-index:-1;
+  background:var(--art,none) center/cover;filter:blur(64px) saturate(1.3);opacity:.3;
+}
+main{
+  width:100%;max-width:420px;margin:auto;
+  padding:32px 24px calc(32px + env(safe-area-inset-bottom));
+  display:flex;flex-direction:column;align-items:center;text-align:center;
+}
+/* Sized before anything loads, so the page never jumps; capped by height for short screens. */
+.art{
+  width:min(64vw,260px,30dvh);aspect-ratio:1;border-radius:24px;overflow:hidden;
+  display:grid;place-items:center;background:#232838;color:#5B6485;
+  box-shadow:0 18px 48px rgba(0,0,0,.45);
+}
+.art>*{grid-area:1/1}
+.art svg{width:38%;height:38%;fill:currentColor}
+.art img{width:100%;height:100%;object-fit:cover}
+.station{
+  margin-top:28px;min-height:1.2em;max-width:100%;
+  font-size:.75rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#B9C3F8;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+h1{
+  margin-top:8px;font-size:1.35rem;font-weight:700;line-height:1.25;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.artist{
+  margin-top:6px;min-height:1.3em;max-width:100%;font-size:.95rem;color:#98A0B8;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.btn{
+  display:flex;align-items:center;justify-content:center;gap:10px;
+  width:100%;min-height:54px;padding:0 20px;border-radius:27px;
+  font-size:1rem;font-weight:600;color:#E4E7F2;text-decoration:none;
+  transition:transform .08s,background .15s;
+}
+.btn svg{width:20px;height:20px;fill:currentColor;flex-shrink:0}
+.btn:active{transform:scale(.98)}
+.btn:focus-visible{outline:2px solid #B9C3F8;outline-offset:3px}
+.app{margin-top:32px;background:#B9C3F8;color:#10131C}
+.app:active{background:#A4B0F0}
+.web{margin-top:12px;border:1px solid #39415E}
+.web:active{background:#232838}
+.hint{margin-top:20px;font-size:.8rem;line-height:1.4;color:#98A0B8}
+@media (prefers-reduced-motion:reduce){.btn{transition:none}}
+</style>
 </head>
 <body>
-<h1>Listen to this station</h1>
-<div id="apps"></div>
-<a class="web" href="/">Open the web player</a>
+<main>
+  <div class="art" aria-hidden="true">
+    <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+    <img id="cover" alt="" hidden>
+  </div>
+  <p class="station" id="station"></p>
+  <h1 id="title">Listen to this station</h1>
+  <p class="artist" id="artist"></p>
+  <a class="btn app" id="open">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>
+    <span id="open-label"></span>
+  </a>
+  <a class="btn web" href="/">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+    <span>Listen in the browser</span>
+  </a>
+  <p class="hint" id="hint"></p>
+</main>
 <script>
 'use strict';
-// Same link as JoinUrl.intentLink. The fallback is the bare root: snapserver 404s on a query.
 (function () {
-  const scheme = location.protocol.slice(0, -1);
-  const fallback = encodeURIComponent(location.origin + '/');
-  const box = document.getElementById('apps');
-  for (const a of APPS) {
-    const el = document.createElement('a');
-    el.className = 'app';
-    el.href = 'intent://' + location.host + '/join/#Intent;scheme=' + scheme + ';package=' + a.pkg +
-      ';S.browser_fallback_url=' + fallback + ';end';
-    el.textContent = 'Open in ' + a.label;
-    box.appendChild(el);
+  if (!APP) return; // the redirect to the player is already under way
+  const $ = id => document.getElementById(id);
+
+  // Same link as JoinUrl.intentLink. The fallback is the bare root: snapserver 404s on a query.
+  $('open').href = 'intent://' + location.host + '/join/#Intent;scheme=' + location.protocol.slice(0, -1) +
+    ';package=' + APP.pkg + ';S.browser_fallback_url=' + encodeURIComponent(location.origin + '/') + ';end';
+  $('open-label').textContent = 'Open in ' + APP.label;
+  $('hint').textContent = 'No ' + APP.label + ' on this phone? The same button opens the web player.';
+
+  // What is playing, from snapserver's JSON-RPC on this origin. Decoration only: the page is
+  // complete without it, so every failure is silent.
+  function show(server) {
+    const streams = server.streams || [];
+    const stream = streams.find(s => s.status === 'playing') || streams[0];
+    const md = (stream && stream.properties && stream.properties.metadata) || {};
+    const host = server.server && server.server.host && server.server.host.name;
+    const artist = Array.isArray(md.artist) ? md.artist.join(', ') : md.artist;
+    $('station').textContent = md.station || host || '';
+    if (md.title) $('title').textContent = md.title;
+    $('artist').textContent = artist || '';
+
+    // The full image the broadcaster serves, then the thumbnail embedded in the metadata.
+    const sources = [];
+    if (md.artUrl) sources.push(new URL(md.artUrl, location.origin).href);
+    if (md.artData && md.artData.data) {
+      const ext = String(md.artData.extension || 'jpeg').toLowerCase();
+      const type = ext === 'jpg' ? 'jpeg' : ext === 'svg' ? 'svg+xml' : ext;
+      sources.push('data:image/' + type + ';base64,' + md.artData.data);
+    }
+    const cover = $('cover');
+    const next = () => {
+      const src = sources.shift();
+      if (src) cover.src = src;
+    };
+    cover.onerror = next;
+    cover.onload = () => {
+      cover.hidden = false;
+      document.body.style.setProperty('--art', 'url("' + cover.src + '")');
+    };
+    next();
   }
+
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(), 4000);
+  fetch('/jsonrpc', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: 1, jsonrpc: '2.0', method: 'Server.GetStatus'}),
+    signal: abort.signal,
+  }).then(r => r.json()).then(j => show(j.result.server)).catch(() => {});
 })();
 </script>
 </body>

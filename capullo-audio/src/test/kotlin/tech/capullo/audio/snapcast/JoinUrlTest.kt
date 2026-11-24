@@ -132,9 +132,18 @@ class JoinUrlTest {
     }
 
     @Test
-    fun `the shipped landing page gets every app filled in`() {
-        val page = JoinUrl.landingPage(File("src/main/assets/webui/join/index.html").readText())
-        assertFalse("placeholder left in the page", "/*CAPULLO_APPS*/" in page)
-        JoinUrl.APPS.forEach { assertTrue(it.packageName, "\"pkg\":\"${it.packageName}\"" in page) }
+    fun `the shipped landing page offers the broadcasting app and no other`() {
+        val template = File("src/main/assets/webui/join/index.html").readText()
+        val page = JoinUrl.landingPage(template, JoinUrl.PACKAGE_QUANTUMCAST)
+        assertTrue("""const APP = {"pkg":"${JoinUrl.PACKAGE_QUANTUMCAST}","label":"QuantumCast"};""" in page)
+        JoinUrl.APPS.map { it.packageName }.filter { it != JoinUrl.PACKAGE_QUANTUMCAST }
+            .forEach { assertFalse(it, it in page) }
+    }
+
+    @Test
+    fun `a broadcaster that joins no stations leaves the page redirecting to the player`() {
+        val template = File("src/main/assets/webui/join/index.html").readText()
+        assertTrue("const APP = /*CAPULLO_APP*/null;" in template)
+        assertEquals(template, JoinUrl.landingPage(template, "tech.capullo.audio.harness"))
     }
 }
