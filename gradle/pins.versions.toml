@@ -7,7 +7,7 @@
 # build substitutes the sibling project when it's checked out next to this repo.
 contracts = "main-SNAPSHOT"
 # lib-snapcast-android via jitpack - same coordinate the apps use, no token.
-libSnapcast = "7e7c272"
+libSnapcast = "4776f7493c95675c3a06c57229cd6c20d3d7ba11"
 # lib-media3-ffmpeg-android via jitpack - prebuilt media3 decoder_ffmpeg AAR, pinned by
 # commit (rebuilt/re-tagged only when media3 bumps; see that repo's BUILD_FFMPEG.md).
 libMedia3Ffmpeg = "046f2fcbd66d067242dd9df51612b1a7b4ccbd86"
