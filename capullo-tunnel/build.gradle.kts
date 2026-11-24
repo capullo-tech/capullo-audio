@@ -32,12 +32,12 @@ plugins {
 // lines through the same cliutil.LogTable, and normalizeQuickTunnelURL is the same
 // https://-prefixing, so parsePublicUrl's input is unchanged. New provisioning error
 // messages carry no https:// host, so they can't false-match PUBLIC_URL_RE either.
-val cloudflaredVersion = "2026.11.0"
+val cloudflaredVersion = "2026.11.1"
 val cloudflaredAbis = mapOf(
-    "arm64-v8a" to ("aarch64" to "60c9e66116f6239b01c1dc8b4a7337b6d0962f8e1b62da47e21b0aa58000416b"),
-    "armeabi-v7a" to ("arm" to "3d04ff1e6817245a67d3b9dfa3f64aba69109b9d2f531b07cd2d2e80434044a1"),
-    "x86" to ("i686" to "08f32f6c24739dc6ec5c1fd6f415b2775eb6a64354dd674c259d8a1c6920210b"),
-    "x86_64" to ("x86_64" to "317c7184ef0d0102bbd70756f8b47380491e18325ad7001529ace16319104c6e"),
+    "arm64-v8a" to ("aarch64" to "56ca76fe7222c050d99dfe85e4e316632436f93798bed98d705ca42d776e14cc"),
+    "armeabi-v7a" to ("arm" to "b65e03d13e152d9c7627bea11c0adf8976cb16e0106a3a7f91a59a8f449481fd"),
+    "x86" to ("i686" to "1e4d8c559b48b4a22fe71952ea02f350d66830d467ffc0da9d474466290a8eea"),
+    "x86_64" to ("x86_64" to "07948ff99ba7e1aa9f25709c155f416a129dbad1cac5fd1035c529367d33a208"),
 )
 
 // A typed task with a DirectoryProperty output, not a plain `tasks.register {}`: AGP 9 refuses a
