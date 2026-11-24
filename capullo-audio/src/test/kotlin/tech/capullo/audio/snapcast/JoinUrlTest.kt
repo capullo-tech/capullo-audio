@@ -146,4 +146,11 @@ class JoinUrlTest {
         assertTrue("const APP = /*CAPULLO_APP*/null;" in template)
         assertEquals(template, JoinUrl.landingPage(template, "tech.capullo.audio.harness"))
     }
+
+    @Test
+    fun `a cloned broadcaster offers the app a listener has`() {
+        val template = File("src/main/assets/webui/join/index.html").readText()
+        val page = JoinUrl.landingPage(template, JoinUrl.PACKAGE_CAPULLO_TUBE + ".clone")
+        assertTrue("""const APP = {"pkg":"${JoinUrl.PACKAGE_CAPULLO_TUBE}","label":"CapulloTube"};""" in page)
+    }
 }

@@ -128,9 +128,7 @@ h1{
     const sources = [];
     if (md.artUrl) sources.push(new URL(md.artUrl, location.origin).href);
     if (md.artData && md.artData.data) {
-      const ext = String(md.artData.extension || 'jpeg').toLowerCase();
-      const type = ext === 'jpg' ? 'jpeg' : ext === 'svg' ? 'svg+xml' : ext;
-      sources.push('data:image/' + type + ';base64,' + md.artData.data);
+      sources.push('data:' + artMime(md.artData.data, md.artData.extension) + ';base64,' + md.artData.data);
     }
     const cover = $('cover');
     const next = () => {
@@ -140,9 +138,27 @@ h1{
     cover.onerror = next;
     cover.onload = () => {
       cover.hidden = false;
-      document.body.style.setProperty('--art', 'url("' + cover.src + '")');
+      // Only for URLs that cannot carry a quote into the CSS: new URL() percent-encodes one in an
+      // http(s) URL, and base64 has none. A data: URL of any other kind gets no backdrop.
+      if (/^(https?:|data:image\/[a-z+.-]+;base64,)/.test(cover.src)) {
+        document.body.style.setProperty('--art', 'url("' + cover.src + '")');
+      }
     };
     next();
+  }
+
+  // Same as the web player's: the image MIME from the base64 magic bytes, since older
+  // broadcasters derive artData.extension from the art URL (garbage for radio favicons).
+  function artMime(b64, ext) {
+    try {
+      const b = atob(b64.slice(0, 24));
+      if (b.charCodeAt(0) === 0x89 && b.slice(1, 4) === 'PNG') return 'image/png';
+      if (b.charCodeAt(0) === 0xFF && b.charCodeAt(1) === 0xD8) return 'image/jpeg';
+      if (b.slice(0, 3) === 'GIF') return 'image/gif';
+      if (b.slice(0, 4) === 'RIFF' && b.slice(8, 12) === 'WEBP') return 'image/webp';
+    } catch (_) {}
+    const e = String(ext || 'jpeg').toLowerCase().replace('jpg', 'jpeg');
+    return 'image/' + (/^[a-z0-9]{2,5}$/.test(e) ? e : 'jpeg');
   }
 
   const abort = new AbortController();

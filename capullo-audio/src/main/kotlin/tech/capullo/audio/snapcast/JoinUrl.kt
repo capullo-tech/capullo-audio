@@ -67,13 +67,17 @@ object JoinUrl {
 
     /**
      * The landing page `join/index.html` for a broadcast by [packageName]: that app, when it is one
-     * of [APPS], filled into the page's [APP_PLACEHOLDER], so its button is the only one offered. For
+     * of [APPS], filled into the page's [APP_PLACEHOLDER], so its button is the only one offered. A
+     * cloned install (`<package>.clone`) offers the original package, the one a listener has. For
      * any other broadcaster the placeholder is left as is and the page redirects to the player.
      */
     internal fun landingPage(template: String, packageName: String): String {
-        val app = APPS.firstOrNull { it.packageName == packageName } ?: return template
+        val base = packageName.removeSuffix(CLONE_SUFFIX)
+        val app = APPS.firstOrNull { it.packageName == base } ?: return template
         return template.replace(APP_PLACEHOLDER, """{"pkg":"${app.packageName}","label":"${app.label}"}""")
     }
+
+    private const val CLONE_SUFFIX = ".clone"
 
     private const val APP_PLACEHOLDER = "/*CAPULLO_APP*/null"
 
