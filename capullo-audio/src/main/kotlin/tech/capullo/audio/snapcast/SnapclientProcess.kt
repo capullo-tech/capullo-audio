@@ -33,6 +33,16 @@ class SnapclientProcess(private val context: Context) {
     private val fpb: String? = audioManager.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)
     private val sampleFormat = "$rate:16:*"
 
+    /**
+     * Whether this client really hears the station, not whether a socket opened:
+     * - [STARTING] until the first proof, [ERROR] once the link has failed and until it is proven again.
+     * - [CONNECTED] only on proof that the link works both ways: the time sync with the server
+     *   completed, or audio has played without a break for several seconds.
+     *
+     * On a link too slow or lossy to sync, the native client reconnects every few seconds and its
+     * TCP connect succeeds every time. Reporting that as connected told a silent listener it was
+     * "playing in sync" half the time; see [connectionStateAfter].
+     */
     enum class ConnectionState { STARTING, CONNECTED, ERROR }
 
     private val _connectionState = MutableStateFlow(ConnectionState.STARTING)
@@ -130,21 +140,19 @@ class SnapclientProcess(private val context: Context) {
             while (reader.readLine().also { line = it } != null) {
                 ensureActive()
                 line?.let {
-                    when {
-                        it.contains("[Error] (Connection)") -> _connectionState.update { ConnectionState.ERROR }
-                        it.contains("[Notice] (Connection) Connected to") -> _connectionState.update { ConnectionState.CONNECTED }
-                        else -> SnapclientStats.parse(it)?.also { s ->
-                            _stats.tryEmit(s)
-                            // Labeled per-second sync diagnostic (raw line is Log.d below). reportedDac
-                            // is Stats col 6 = player-reported output latency; on A2DP the BT estimate.
-                            Log.i(
-                                TAG,
-                                "Stats sync med=${s.medianErrorMs}ms " +
-                                    "(mini=${s.miniMedianErrorMs} short=${s.shortMedianErrorMs}) " +
-                                    "reportedDac=${s.reportedOutputLatencyMs}ms " +
-                                    "fill=${s.statsWindowFill} frameDelta=${s.frameDelta}",
-                            )
-                        }
+                    val stats = SnapclientStats.parse(it)
+                    _connectionState.update { state -> connectionStateAfter(it, stats, state) }
+                    stats?.also { s ->
+                        _stats.tryEmit(s)
+                        // Labeled per-second sync diagnostic (raw line is Log.d below). reportedDac
+                        // is Stats col 6 = player-reported output latency; on A2DP the BT estimate.
+                        Log.i(
+                            TAG,
+                            "Stats sync med=${s.medianErrorMs}ms " +
+                                "(mini=${s.miniMedianErrorMs} short=${s.shortMedianErrorMs}) " +
+                                "reportedDac=${s.reportedOutputLatencyMs}ms " +
+                                "fill=${s.statsWindowFill} frameDelta=${s.frameDelta}",
+                        )
                     }
                     Log.d(TAG, it)
                 }
@@ -182,6 +190,29 @@ class SnapclientProcess(private val context: Context) {
 
     companion object {
         private val TAG = SnapclientProcess::class.java.simpleName
+
+        /**
+         * [current] after one line of the native client's log; [stats] is that line when it is a
+         * Stats line.
+         *
+         * Proof of a working link, either of:
+         * - `diff to server`, logged once the 50 quick time syncs that follow the hello all came
+         *   back (each has 2 s). Measured at 0.9 s on a LAN and 1.3 s over a VPN.
+         * - A full Stats window, which takes about 6 s of unbroken audio. It covers a link whose
+         *   round trips are slow enough for the quick syncs to outlast that (300 ms each is 15 s)
+         *   while the audio already plays.
+         *
+         * `Connected to` proves nothing and changes nothing: it is the TCP connect, which also
+         * succeeds on every turn of a reconnect loop. So does a Stats line with a short window: a
+         * loop plays a moment of audio each turn. A failed link is `[Error] (Connection)` or the
+         * controller's `Reconnecting`, and stays failed until the next proof.
+         */
+        internal fun connectionStateAfter(line: String, stats: SnapclientStats?, current: ConnectionState): ConnectionState = when {
+            stats != null -> if (stats.statsWindowFill >= SnapclientStats.WINDOW) ConnectionState.CONNECTED else current
+            line.contains("[Error] (Connection)") || line.contains("(Controller) Reconnecting") -> ConnectionState.ERROR
+            line.contains("(Controller) diff to server") -> ConnectionState.CONNECTED
+            else -> current
+        }
 
         /** The persistent --hostID this device's snapclient registers with -
          *  equals its client id on any snapserver (used to exclude self from

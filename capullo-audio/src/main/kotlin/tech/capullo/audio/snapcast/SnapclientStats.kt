@@ -23,7 +23,7 @@ data class SnapclientStats(
     val shortMedianErrorMs: Double,
     /** Median sync error over the last 500 samples (~tens of seconds), ms. */
     val medianErrorMs: Double,
-    /** Fill count of the 500-sample stats window (maxes out at 500). */
+    /** Fill count of the stats window; maxes out at [WINDOW], and starts over on a reconnect. */
     val statsWindowFill: Int,
     /** Player-reported output (DAC) latency, ms — on A2DP this is the BT stack's estimate. */
     val reportedOutputLatencyMs: Double,
@@ -32,6 +32,9 @@ data class SnapclientStats(
 ) {
     companion object {
         private const val MARKER = "(Stats) Chunk: "
+
+        /** Samples in the native client's stats window (`client/stream.cpp`): about 6 s of audio. */
+        const val WINDOW = 500
 
         /** Parses a raw snapclient stdout line; null if it isn't a well-formed Stats line. */
         fun parse(line: String): SnapclientStats? {
