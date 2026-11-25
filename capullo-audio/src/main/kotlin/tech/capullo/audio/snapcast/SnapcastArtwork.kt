@@ -40,9 +40,11 @@ data class SnapcastArt(
  * read nothing but embedded art. [SnapcontrolMetadataMapper] enforces the size limit on `artData`
  * independently, so an app that hands it anything bigger loses the embed rather than stalling.
  *
- * One instance per app process: it remembers which files are current (see [ArtFileStore]).
+ * One instance per app process, from [get]: it remembers which files are current (see [ArtFileStore]).
+ * A second instance, such as one per recreated service, has forgotten the previous file and deletes
+ * it on its first [publish], although a client may still be fetching it.
  */
-class SnapcastArtwork(context: Context) {
+class SnapcastArtwork private constructor(context: Context) {
 
     private val store = ArtFileStore(File(SnapserverProcess.docRoot(context), ART_DIR), "/$ART_DIR/")
 
@@ -58,6 +60,14 @@ class SnapcastArtwork(context: Context) {
 
     companion object {
         private const val TAG = "SnapcastArtwork"
+
+        @Volatile private var instance: SnapcastArtwork? = null
+
+        /** The process-wide instance, created on first use from the application context. */
+        fun get(context: Context): SnapcastArtwork = instance ?: synchronized(this) {
+            instance ?: SnapcastArtwork(context.applicationContext).also { instance = it }
+        }
+
         private const val ART_DIR = "art"
 
         /** Longest side of the embedded fallback: enough for a list icon or a notification. */
