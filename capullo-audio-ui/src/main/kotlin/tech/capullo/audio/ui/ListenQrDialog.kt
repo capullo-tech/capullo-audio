@@ -35,10 +35,6 @@ sealed interface PublicLinkState {
     data class Error(val message: String) : PublicLinkState
 }
 
-const val NO_IP_NOTE =
-    "No network address found. Make sure Wi-Fi or the hotspot is turned on, " +
-        "and switch any VPN off - some VPNs hide the local network."
-
 // Only interfaces a listener could realistically reach: Wi-Fi, hotspot,
 // Ethernet, VPN (Tailscale etc.). Cellular (rmnet), loopback and link-local
 // addresses are useless for LAN clients and omitted.
@@ -87,7 +83,7 @@ private fun shareText(context: Context, text: String) {
         type = "text/plain"
         putExtra(Intent.EXTRA_TEXT, text)
     }
-    context.startActivity(Intent.createChooser(send, "Share listening address"))
+    context.startActivity(Intent.createChooser(send, "Invite listeners"))
 }
 
 // The tunnel's base URL (https://<host>) as its join URL; an unparsable URL is shown as-is.
@@ -112,8 +108,9 @@ private fun publicJoinUrl(base: String): String = try {
 // Single floating QR dialog for the web-player address. One chip row picks how the listener
 // reaches this device: a chip per local network (Wi-Fi, hotspot, Ethernet, VPN) and, when the
 // app can open one, "Cloudflare" for the zero-install public link. Picking Cloudflare is what
-// turns the link on, and it stays on while another chip shows its QR, until "Turn off". With
-// nothing to offer at all it shows the "check Wi-Fi/hotspot/VPN" note.
+// turns the link on, and it stays on while another chip shows its QR, until "Turn off". With no
+// local network the Cloudflare chip stands alone, and with nothing to offer at all the dialog
+// says so.
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ListenQrDialog(
@@ -133,8 +130,8 @@ fun ListenQrDialog(
     if (ips.isEmpty() && !offerCloudflare) {
         AlertDialog(
             onDismissRequest = onDismiss,
-            title = { Text("No network detected") },
-            text = { Text(NO_IP_NOTE) },
+            title = { Text("No network") },
+            text = { Text("Connect to Wi-Fi or turn on the hotspot.") },
             confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
         )
         return
@@ -151,12 +148,12 @@ fun ListenQrDialog(
     val lan = selected.takeIf { !showCloudflare }
     val lanUrl = lan?.let { JoinUrl.build(it.address, httpPort) }
 
-    // One name per chip, the same in the title: a second name for the public link ("Listen
-    // anywhere" next to a "Public link" setting) read as two different features.
+    // The title follows the chip. Nothing picked (no local network, Cloudflare not picked yet):
+    // the name of the button that opened the dialog.
     val title = when {
-        showCloudflare -> "Listen via Cloudflare"
-        lan != null -> "Listen via ${lan.label}"
-        else -> "Listen"
+        showCloudflare -> "Listen from anywhere"
+        lan != null -> "Listen on ${lan.label}"
+        else -> "Invite listeners"
     }
 
     AlertDialog(
@@ -192,7 +189,7 @@ fun ListenQrDialog(
                                     {
                                         Icon(
                                             Icons.Default.Cloud,
-                                            contentDescription = "Public link is on",
+                                            contentDescription = "Public link active",
                                             modifier = Modifier.size(FilterChipDefaults.IconSize),
                                         )
                                     }
@@ -204,14 +201,11 @@ fun ListenQrDialog(
                     }
                     Spacer(Modifier.height(8.dp))
                 }
+                // Neither: no local network and Cloudflare not picked yet. The chip is the whole
+                // dialog then, with no text under it.
                 when {
                     showCloudflare -> PublicLinkContent(publicLink)
                     lanUrl != null -> LanContent(lanUrl)
-                    else -> Text(
-                        NO_IP_NOTE,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
             }
         },
@@ -234,12 +228,7 @@ fun ListenQrDialog(
 @Composable
 private fun LanContent(url: String) {
     QrAndAddress(url)
-    Text(
-        "Scan with the other device's camera to open the web player, or a capullo app if " +
-            "installed - pick the network the other device is on.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    ScanHint("Scan to listen on a device connected to the same network.")
     LinkActions(url)
 }
 
@@ -289,7 +278,7 @@ private fun PublicLinkContent(publicLink: PublicLinkState) {
         is PublicLinkState.Active -> {
             val url = publicJoinUrl(publicLink.url)
             QrAndAddress(url)
-            PublicLinkWarning()
+            ScanHint("Scan to listen on a device connected to the internet.")
             LinkActions(url)
         }
         // Off: the chip was just picked and the app has not reported the start yet.
@@ -297,32 +286,32 @@ private fun PublicLinkContent(publicLink: PublicLinkState) {
             CircularProgressIndicator()
             Spacer(Modifier.height(12.dp))
             Text(
-                "Establishing tunnel…",
+                "Creating public link…",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(8.dp))
-            PublicLinkWarning()
         }
         is PublicLinkState.Error -> {
             Text(
-                "Tunnel error: ${publicLink.message}. Retrying automatically.",
+                "Couldn't create the link. Retrying…",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.error,
             )
-            Spacer(Modifier.height(8.dp))
-            PublicLinkWarning()
+            Text(
+                publicLink.message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
 
-// In every state of the pane, so it is on screen from the moment the chip is picked, seconds
-// before the link exists and with "Turn off" right below: no settings switch carries it any more.
+// The one line under a QR: who can scan it.
 @Composable
-private fun PublicLinkWarning() {
+private fun ScanHint(text: String) {
     Text(
-        "Anyone with the link can listen and control - no app needed. " +
-            "About 1.4 Mbps of your upload per listener.",
+        text,
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         textAlign = TextAlign.Center,

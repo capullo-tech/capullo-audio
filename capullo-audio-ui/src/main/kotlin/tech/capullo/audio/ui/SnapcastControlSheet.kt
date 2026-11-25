@@ -199,7 +199,7 @@ fun SnapcastControlSheet(
                 IconButton(onClick = { showQr = true }, modifier = Modifier.size(40.dp)) {
                     Icon(
                         imageVector = Icons.Default.QrCode,
-                        contentDescription = "Show listening address QR code",
+                        contentDescription = "Invite listeners",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }

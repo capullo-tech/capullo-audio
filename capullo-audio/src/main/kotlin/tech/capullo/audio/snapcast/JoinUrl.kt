@@ -50,7 +50,7 @@ object JoinUrl {
      * the LAN, or the tunnel's HTTPS port ([https] = true, 443 is left implicit). An IPv6 [host] may be
      * given bare or bracketed.
      */
-    fun build(host: String, port: Int, https: Boolean = false): String = "${if (https) "https" else "http"}://${authority(host, port, https)}$PATH"
+    fun build(host: String, port: Int, https: Boolean = false): String = "${if (https) "https" else "http"}://${checkedAuthority(host, port, https)}$PATH"
 
     /**
      * An Android `intent:` link that opens [target]'s join URL in [packageName] (one of [APPS]), with
@@ -59,7 +59,7 @@ object JoinUrl {
      */
     fun intentLink(target: JoinTarget, packageName: String): String {
         val scheme = if (target.secure) "https" else "http"
-        val authority = authority(target.host, target.httpPort, target.secure)
+        val authority = checkedAuthority(target.host, target.httpPort, target.secure)
         val fallback = URLEncoder.encode("$scheme://$authority/", "UTF-8")
         return "intent://$authority$PATH#Intent;scheme=$scheme;package=$packageName;" +
             "S.browser_fallback_url=$fallback;end"
@@ -81,12 +81,23 @@ object JoinUrl {
 
     private const val APP_PLACEHOLDER = "/*CAPULLO_APP*/null"
 
-    private fun authority(host: String, port: Int, https: Boolean): String {
+    /**
+     * The URI authority for [host]:[port]: an IPv6 literal bracketed whether given bare or
+     * bracketed, an IPv4 address or a name unchanged, and [port] left implicit when it is 443 and
+     * the scheme is [secure] (https, wss). Hosts travel bare ([parse] strips the brackets), so every
+     * URL or URI built from a host and a port takes its authority from here.
+     */
+    fun authority(host: String, port: Int, secure: Boolean = false): String {
         val bare = host.trim().removeSurrounding("[", "]")
-        require(bare.isNotEmpty()) { "empty host" }
-        require(port in 1..MAX_PORT) { "port out of range: $port" }
         val hostPart = if (':' in bare) "[$bare]" else bare
-        return if (https && port == HTTPS_PORT) hostPart else "$hostPart:$port"
+        return if (secure && port == HTTPS_PORT) hostPart else "$hostPart:$port"
+    }
+
+    /** [authority] of a URL handed to listeners: throws on an empty host or an out-of-range port. */
+    private fun checkedAuthority(host: String, port: Int, https: Boolean): String {
+        require(host.trim().removeSurrounding("[", "]").isNotEmpty()) { "empty host" }
+        require(port in 1..MAX_PORT) { "port out of range: $port" }
+        return authority(host, port, https)
     }
 
     /**

@@ -29,26 +29,30 @@ object SnapcastRemoteArt {
 
     /**
      * Where a listener connected to the snapserver at [host]:[httpPort] fetches the art named by
-     * [artUrl], or null when there is nothing worth fetching:
-     *  - a path (what capullo broadcasters send) lives on that snapserver: `http://host:httpPort/path`;
+     * [artUrl], or null when there is nothing worth fetching. [secure] is a join through the public
+     * link, where that snapserver is reached as `https://host` ([httpPort] is the tunnel's 443).
+     *  - a path (what capullo broadcasters send) lives on that snapserver: `http://host:httpPort/path`,
+     *    or `https://host/path` when [secure];
+     *  - a scheme-relative `//host/path` takes the scheme of that snapserver;
      *  - an absolute http(s) URL (a radio station's logo) is used as is;
      *  - null for blank values, other schemes (`data:`, `file:`), loopback hosts (the broadcaster's own
      *    device, not this one) and snapserver's own `/__image_cache` URL: snapserver builds that from
      *    `artData` alone, under its configured host name (`localhost` on Android), so it holds nothing
      *    beyond the embedded image and is usually unreachable anyway.
      */
-    fun resolveUrl(artUrl: String?, host: String, httpPort: Int): String? {
+    fun resolveUrl(artUrl: String?, host: String, httpPort: Int, secure: Boolean = false): String? {
         val url = artUrl?.trim().orEmpty()
         if (url.isEmpty()) return null
-        if (url.startsWith("//")) return resolveUrl("http:$url", host, httpPort)
+        val baseScheme = if (secure) "https" else "http"
+        if (url.startsWith("//")) return resolveUrl("$baseScheme:$url", host, httpPort, secure)
         val schemeEnd = url.indexOf("://")
         if (schemeEnd < 0) {
             // No scheme: a path on the remote snapserver - unless it is `data:`, `blob:`, ….
             val colon = url.indexOf(':')
             if (colon >= 0 && (url.indexOf('/').let { it < 0 || colon < it })) return null
             if (host.isEmpty() || httpPort <= 0) return null
-            val authority = if (':' in host && !host.startsWith("[")) "[$host]" else host
-            return "http://$authority:$httpPort" + (if (url.startsWith("/")) url else "/$url")
+            val origin = "$baseScheme://${JoinUrl.authority(host, httpPort, secure)}"
+            return origin + (if (url.startsWith("/")) url else "/$url")
         }
         val scheme = url.substring(0, schemeEnd).lowercase()
         if (scheme != "http" && scheme != "https") return null

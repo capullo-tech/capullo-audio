@@ -30,6 +30,22 @@ class JoinUrlTest {
         assertEquals("http://[fd7a:115c::1]:1680/join/", JoinUrl.build("[fd7a:115c::1]", 1680))
     }
 
+    @Test
+    fun `authority brackets an IPv6 host once and leaves IPv4 and names unchanged`() {
+        assertEquals("[fd7a:115c::1]:1680", JoinUrl.authority("fd7a:115c::1", 1680))
+        assertEquals("[fd7a:115c::1]:1680", JoinUrl.authority("[fd7a:115c::1]", 1680))
+        assertEquals("192.168.1.20:1680", JoinUrl.authority("192.168.1.20", 1680))
+        assertEquals("phone.lan:1680", JoinUrl.authority("phone.lan", 1680))
+    }
+
+    @Test
+    fun `authority drops 443 only for a secure scheme`() {
+        assertEquals("x.trycloudflare.com", JoinUrl.authority("x.trycloudflare.com", 443, secure = true))
+        assertEquals("[fd7a:115c::1]", JoinUrl.authority("fd7a:115c::1", 443, secure = true))
+        assertEquals("x.example:8443", JoinUrl.authority("x.example", 8443, secure = true))
+        assertEquals("10.0.0.2:443", JoinUrl.authority("10.0.0.2", 443))
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `build rejects an out-of-range port`() {
         JoinUrl.build("10.0.0.2", 70000)
