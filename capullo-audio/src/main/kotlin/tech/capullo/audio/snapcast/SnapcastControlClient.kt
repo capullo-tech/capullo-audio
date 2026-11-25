@@ -7,13 +7,13 @@ import io.ktor.client.plugins.websocket.DefaultClientWebSocketSession
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.sendSerialized
 import io.ktor.client.plugins.websocket.webSocketSession
-import io.ktor.http.HttpMethod
 import io.ktor.serialization.kotlinx.KotlinxWebsocketSerializationConverter
 import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,11 +23,19 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.util.concurrent.TimeUnit
 
+/**
+ * JSON-RPC control of the snapserver at [snapserverHostAddress]: its `/jsonrpc` websocket on the
+ * HTTP port [websocketPort]. [secure] dials `wss` instead of `ws`, for a public-link join: the
+ * tunnel terminates TLS on 443 and forwards to that HTTP port, websocket upgrade included.
+ */
 class SnapcastControlClient(
-    private val snapserverHostAddress: String,
-    private val websocketPort: Int = 1680,
+    snapserverHostAddress: String,
+    websocketPort: Int = 1680,
+    secure: Boolean = false,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : tech.capullo.audio.calibration.CalibrationControl {
+    private val url = jsonRpcUrl(snapserverHostAddress, websocketPort, secure)
+
     // internal, not public: consumers tear down via close() instead of touching the ktor client, so
     // ktor stays an implementation detail of this module (apps don't need ktor on their classpath).
     internal val client = HttpClient(OkHttp) {
@@ -49,14 +57,9 @@ class SnapcastControlClient(
 
     suspend fun initialize() = withContext(ioDispatcher) {
         while (true) {
-            Log.d(TAG, "Connecting to $snapserverHostAddress")
+            Log.d(TAG, "Connecting to $url")
             try {
-                session = client.webSocketSession(
-                    method = HttpMethod.Get,
-                    host = snapserverHostAddress,
-                    port = websocketPort,
-                    path = "/jsonrpc",
-                )
+                session = client.webSocketSession(url)
                 _connectionState.update { ConnectionState.CONNECTED }
                 sendGetStatus()
                 break
@@ -74,12 +77,16 @@ class SnapcastControlClient(
                 try {
                     return@withContext session?.incoming?.receive() as? Frame.Text
                 } catch (e: Exception) {
+                    // The collector went away (a leave, a new join): stop here, that is no dropped link.
+                    ensureActive()
                     Log.d(TAG, "Frame read error: $e")
                     delay(1000)
-                    if (e is java.io.EOFException) {
-                        _connectionState.update { ConnectionState.ERROR }
-                        initialize()
-                    }
+                    // Any failed read means the session is gone: a dropped link ends with an I/O
+                    // error, a server or tunnel that closed it cleanly with
+                    // ClosedReceiveChannelException. Reconnecting only on EOFException left a
+                    // cleanly closed session dead for good (no client list, no volume).
+                    _connectionState.update { ConnectionState.ERROR }
+                    initialize()
                 }
                 return@withContext null
             }
@@ -167,5 +174,12 @@ class SnapcastControlClient(
 
     companion object {
         private val TAG = SnapcastControlClient::class.simpleName
+
+        /**
+         * `ws://host:port/jsonrpc`, or `wss://host/jsonrpc` when [secure] (443 left implicit). Built
+         * as a string because ktor's `webSocketSession(host = …)` puts an IPv6 host into the URL
+         * without brackets, which OkHttp then rejects.
+         */
+        internal fun jsonRpcUrl(host: String, port: Int, secure: Boolean): String = "${if (secure) "wss" else "ws"}://${JoinUrl.authority(host, port, secure)}/jsonrpc"
     }
 }

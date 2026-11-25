@@ -15,7 +15,17 @@ class SnapcastRemoteArtTest {
         assertEquals("http://192.168.1.20:41234/art/ab12.jpg", resolve("/art/ab12.jpg"))
         assertEquals("http://192.168.1.20:41234/art/ab12.jpg", resolve("art/ab12.jpg"))
         assertEquals("http://[fe80::1]:41234/art/ab12.jpg", resolve("/art/ab12.jpg", host = "fe80::1"))
+        assertEquals("http://[fe80::1]:41234/art/ab12.jpg", resolve("/art/ab12.jpg", host = "[fe80::1]"))
         assertNull("no host to fetch from", resolve("/art/ab12.jpg", host = ""))
+    }
+
+    @Test
+    fun `through the public link a path is fetched over https from the tunnel host`() {
+        val tunnel = JoinUrl.parse("https://quiet-river.trycloudflare.com/join/")!!
+        fun resolveSecure(artUrl: String) = SnapcastRemoteArt.resolveUrl(artUrl, tunnel.host, tunnel.httpPort, tunnel.secure)
+        assertEquals("https://quiet-river.trycloudflare.com/art/x.jpg", resolveSecure("/art/x.jpg"))
+        assertEquals("https://cdn.example/a.jpg", resolveSecure("//cdn.example/a.jpg"))
+        assertEquals("http://radio.example/logo.png", resolveSecure("http://radio.example/logo.png"))
     }
 
     @Test

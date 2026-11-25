@@ -109,7 +109,7 @@ class SnapclientProcess(private val context: Context) {
             "--sampleformat", sampleFormat,
             "--logfilter", "*:info,Stats:debug",
             "--channel", audioChannel,
-            "$scheme://$snapserverAddress:$snapserverPort",
+            serverUri(scheme, snapserverAddress, snapserverPort),
         )
 
         val env = pb.environment()
@@ -213,6 +213,14 @@ class SnapclientProcess(private val context: Context) {
             line.contains("(Controller) diff to server") -> ConnectionState.CONNECTED
             else -> current
         }
+
+        /**
+         * The snapserver URI a snapclient dials: `<scheme>://<host>:<port>`, an IPv6 host bracketed.
+         * The port is always explicit: snapclient defaults `wss` to 1788, not 443. The brackets are
+         * what snapclient's parser needs to tell an IPv6 literal from the port (capullo-tech/snapcast
+         * 85e8cbed, in the pinned lib-snapcast-android); a bare literal is cut at its first `:`.
+         */
+        internal fun serverUri(scheme: String, host: String, port: Int): String = "$scheme://${JoinUrl.authority(host, port)}"
 
         /** The persistent --hostID this device's snapclient registers with -
          *  equals its client id on any snapserver (used to exclude self from

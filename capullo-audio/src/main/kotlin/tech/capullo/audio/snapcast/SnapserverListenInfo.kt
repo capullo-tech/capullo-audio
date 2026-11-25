@@ -57,14 +57,14 @@ object SnapserverListenInfo {
     }
 
     /**
-     * GET `http://$host:$httpPort/listen.json` and parse the ports. Returns null if the endpoint is
+     * GET `http://host:httpPort/listen.json` and parse the ports. Returns null if the endpoint is
      * unreachable or not a capullo broadcaster (e.g. a stock snapserver, or the port is actually a
      * stream / tcp port).
      */
     suspend fun fetch(host: String, httpPort: Int): SnapserverPorts? = withContext(Dispatchers.IO) {
         var conn: HttpURLConnection? = null
         try {
-            conn = (URL("http://$host:$httpPort/listen.json").openConnection() as HttpURLConnection).apply {
+            conn = (URL(listenJsonUrl(host, httpPort)).openConnection() as HttpURLConnection).apply {
                 connectTimeout = TIMEOUT_MS
                 // Short: listen.json answers in milliseconds, and a probe that lands on the stream
                 // socket (typed stream port) can accept and stay silent; don't wait 4 s on it.
@@ -88,4 +88,7 @@ object SnapserverListenInfo {
             conn?.disconnect()
         }
     }
+
+    /** The `listen.json` URL on the LAN HTTP port [httpPort] of [host]. */
+    internal fun listenJsonUrl(host: String, httpPort: Int): String = "http://${JoinUrl.authority(host, httpPort)}/listen.json"
 }

@@ -89,11 +89,15 @@ class ReferenceTapProcess(
      * loses its reference fails through the calibrator's own "measurement failed" path rather than
      * throwing here, which keeps a missing tap indistinguishable from a bad room from the run's
      * point of view (both mean: no usable reference, restore everything, report it).
+     *
+     * [scheme] is the listener's own snapclient's ([SnapclientProcess.start]): `wss` reaches a
+     * station joined through its public link, where the raw stream port is not reachable.
      */
     suspend fun start(
         snapserverAddress: String,
         snapserverPort: Int,
         ring: ReferencePcmRing,
+        scheme: String = "tcp",
     ) = withContext(Dispatchers.IO) {
         val id = stableTapId()
         // A fresh FIFO per run. mkfifo can fail if a previous run died without cleaning up, so the
@@ -111,7 +115,7 @@ class ReferenceTapProcess(
             "--player", "file:filename=${path.absolutePath},mode=w",
             "--sampleformat", "48000:16:*",
             "--logfilter", "*:warning",
-            "tcp://$snapserverAddress:$snapserverPort",
+            SnapclientProcess.serverUri(scheme, snapserverAddress, snapserverPort),
         )
         try {
             process = pb.start().also { hostId = id }
