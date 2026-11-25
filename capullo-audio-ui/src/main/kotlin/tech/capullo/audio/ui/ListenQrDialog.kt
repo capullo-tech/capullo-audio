@@ -215,21 +215,16 @@ fun ListenQrDialog(
                 }
             }
         },
+        // Copy and share sit under the address on every chip, so this row is the same everywhere:
+        // Close, plus Turn off while the Cloudflare chip shows a link this device can end.
         confirmButton = {
-            // Cloudflare renders its own copy/share icon row in-content; LAN keeps the Share text button.
-            when {
-                showCloudflare -> if (onSetPublicLink != null) {
-                    TextButton(
-                        onClick = {
-                            onSetPublicLink(false)
-                            cloudflarePicked = false
-                        },
-                    ) { Text("Turn off") }
-                }
-                lanUrl != null -> {
-                    val context = LocalContext.current
-                    TextButton(onClick = { shareText(context, lanUrl) }) { Text("Share") }
-                }
+            if (showCloudflare && onSetPublicLink != null) {
+                TextButton(
+                    onClick = {
+                        onSetPublicLink(false)
+                        cloudflarePicked = false
+                    },
+                ) { Text("Turn off") }
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
@@ -238,10 +233,23 @@ fun ListenQrDialog(
 
 @Composable
 private fun LanContent(url: String) {
+    QrAndAddress(url)
+    Text(
+        "Scan with the other device's camera to open the web player, or a capullo app if " +
+            "installed - pick the network the other device is on.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    LinkActions(url)
+}
+
+// The QR and the address it encodes; the address can be selected to copy part of it.
+@Composable
+private fun QrAndAddress(url: String) {
     qrBitmap(url)?.let {
         Image(
             bitmap = it.asImageBitmap(),
-            contentDescription = url,
+            contentDescription = "QR code for $url",
             modifier = Modifier
                 .size(240.dp)
                 .background(Color.White)
@@ -249,13 +257,30 @@ private fun LanContent(url: String) {
         )
     }
     Spacer(Modifier.height(12.dp))
-    Text(url, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
-    Text(
-        "Scan with the other device's camera to open the web player, or a capullo app if " +
-            "installed - pick the network the other device is on.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+    SelectionContainer {
+        Text(
+            url,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+// The same two actions under a local address and under the public link.
+@Composable
+private fun LinkActions(url: String) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    Spacer(Modifier.height(4.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        IconButton(onClick = { clipboard.setText(AnnotatedString(url)) }) {
+            Icon(Icons.Default.ContentCopy, contentDescription = "Copy link")
+        }
+        IconButton(onClick = { shareText(context, url) }) {
+            Icon(Icons.Default.Share, contentDescription = "Share link")
+        }
+    }
 }
 
 @Composable
@@ -263,37 +288,9 @@ private fun PublicLinkContent(publicLink: PublicLinkState) {
     when (publicLink) {
         is PublicLinkState.Active -> {
             val url = publicJoinUrl(publicLink.url)
-            val context = LocalContext.current
-            val clipboard = LocalClipboardManager.current
-            qrBitmap(url)?.let {
-                Image(
-                    bitmap = it.asImageBitmap(),
-                    contentDescription = "QR code for $url",
-                    modifier = Modifier
-                        .size(240.dp)
-                        .background(Color.White)
-                        .padding(8.dp),
-                )
-            }
-            Spacer(Modifier.height(12.dp))
-            SelectionContainer {
-                Text(
-                    url,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                )
-            }
+            QrAndAddress(url)
             PublicLinkWarning()
-            Spacer(Modifier.height(4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                IconButton(onClick = { clipboard.setText(AnnotatedString(url)) }) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = "Copy link")
-                }
-                IconButton(onClick = { shareText(context, url) }) {
-                    Icon(Icons.Default.Share, contentDescription = "Share link")
-                }
-            }
+            LinkActions(url)
         }
         // Off: the chip was just picked and the app has not reported the start yet.
         PublicLinkState.Off, PublicLinkState.Starting -> {
