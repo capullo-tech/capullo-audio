@@ -64,7 +64,7 @@ class SnapclientProcess(private val context: Context) {
     private var currentProcess: Process? = null
 
     fun destroy() {
-        currentProcess?.destroyForcibly()
+        currentProcess?.kill()
         currentProcess = null
     }
 
@@ -130,7 +130,7 @@ class SnapclientProcess(private val context: Context) {
         }
         currentProcess = process
         if (!isActive) {
-            process.destroyForcibly()
+            process.kill()
             if (currentProcess === process) currentProcess = null
             return@coroutineScope
         }

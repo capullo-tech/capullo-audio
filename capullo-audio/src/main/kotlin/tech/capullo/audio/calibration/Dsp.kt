@@ -448,7 +448,8 @@ object Dsp {
                 // Re-score against the full-range floor: recover the raw value from the window's
                 // own normalisation, then divide by the noise every other caller uses.
                 val raw = levelAt(r, fs, p.lagMs, halfWindowMs = 0.5)
-                out.putIfAbsent(p.lagMs, Peak(p.lagMs, raw / fullNoise))
+                // getOrPut, not Map.putIfAbsent: that one is API 24 and this library runs on 23.
+                out.getOrPut(p.lagMs) { Peak(p.lagMs, raw / fullNoise) }
             }
         }
         return out.values.sortedByDescending { it.z }
