@@ -62,6 +62,10 @@ fun SnapcastControlSheet(
     onSetChannel: (String) -> Unit = {},
     onChangeClientChannel: (clientId: String, channel: String) -> Unit = { _, _ -> },
     isBroadcaster: Boolean = false,
+    // The QR button that invites listeners. A device that only listens has no station of its own
+    // to invite anyone to, so it follows [isBroadcaster]. An app whose broadcaster has neither
+    // reset nor lock leaves [isBroadcaster] false and passes this while it broadcasts.
+    showInvite: Boolean = isBroadcaster,
     isStreamLocked: Boolean = false,
     onToggleStreamLock: () -> Unit = {},
     // This device's own snapclient id. When the stream is locked and this device is NOT the
@@ -132,7 +136,7 @@ fun SnapcastControlSheet(
             )
         },
     ) {
-        // Reset (broadcaster only, left) · QR share for everyone + stream lock (broadcaster
+        // Reset (broadcaster only, left) · QR invite ([showInvite]) + stream lock (broadcaster
         // only) on the right. Channel is set per-card via the channel badge - the L/Stereo/R
         // segment was removed. SpaceBetween keeps the QR/lock group right-aligned whether or
         // not the left reset slot is present.
@@ -196,12 +200,14 @@ fun SnapcastControlSheet(
                 Spacer(Modifier.size(1.dp))
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = { showQr = true }, modifier = Modifier.size(40.dp)) {
-                    Icon(
-                        imageVector = Icons.Default.QrCode,
-                        contentDescription = "Invite listeners",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                if (showInvite) {
+                    IconButton(onClick = { showQr = true }, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            imageVector = Icons.Default.QrCode,
+                            contentDescription = "Invite listeners",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
                 if (isBroadcaster) {
                     IconButton(onClick = onToggleStreamLock, modifier = Modifier.size(40.dp)) {
