@@ -76,7 +76,9 @@ public class AudioRouteMonitor(
         }
     }
 
-    private fun bluetoothAddress(device: AudioDeviceInfo): String = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) device.address?.trim().orEmpty() else ""
+    // AudioDeviceInfo.getAddress is API 28. The guard said N, so on 24 to 27 the call was missing
+    // and only the caller's runCatching turned that into the same empty address.
+    private fun bluetoothAddress(device: AudioDeviceInfo): String = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) device.address?.trim().orEmpty() else ""
 
     private fun priority(type: Int): Int = when {
         isBluetooth(type) -> 3

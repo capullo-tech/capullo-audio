@@ -156,7 +156,7 @@ class ReferenceTapProcess(
         // second answering "Client not found". Harmless, but it reads as a failure in the log.
         val id = hostId
         hostId = null
-        process?.destroyForcibly()
+        process?.kill()
         process = null
         fifo?.delete()
         fifo = null
